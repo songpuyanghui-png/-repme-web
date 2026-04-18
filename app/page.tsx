@@ -137,7 +137,7 @@ export default function Home() {
 
       setTodayTasks(tasks.map((task) => ({
         ...task,
-        logs: (taskLogs || []).filter((log) => log.task_id === task.id)
+        logs: (taskLogs as WorkLog[] || []).filter((log) => log.task_id === task.id),
       })))
     } catch (error) {
       console.error(error); setTodayTasks([])
