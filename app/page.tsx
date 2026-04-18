@@ -28,21 +28,44 @@ type WorkLog = {
   type?: string | null
   memo?: string | null
   user_id?: string | null
+  task_id?: number | null
 }
 
 type ScheduleTask = {
   id: number
   title?: string | null
+  source_type?: string | null
   plan_type?: string | null
+  start_time?: string | null
+  end_time?: string | null
   scheduled_start_at?: string | null
-  target_minutes?: number | null
   status?: string | null
   repme_code?: string | null
+  target_minutes?: number | null
+  logs?: WorkLog[]
+}
+
+const toLocalInputValue = (utcStr: string): string => {
+  const d = new Date(utcStr + 'Z')
+  const jstOffset = 9 * 60 * 60 * 1000
+  const local = new Date(d.getTime() + jstOffset)
+  return local.toISOString().slice(0, 16)
+}
+
+const toUTC = (localStr: string): string => {
+  const jst = new Date(localStr)
+  return new Date(jst.getTime() - 9 * 60 * 60 * 1000).toISOString()
+}
+
+const calcMinutes = (startLocal: string, endLocal: string): number => {
+  const diff = new Date(endLocal).getTime() - new Date(startLocal).getTime()
+  return Math.max(0, Math.floor(diff / 60000))
 }
 
 export default function Home() {
   const [logs, setLogs] = useState<WorkLog[]>([])
   const [todayTasks, setTodayTasks] = useState<ScheduleTask[]>([])
+  const [allTasks, setAllTasks] = useState<ScheduleTask[]>([])
   const [loading, setLoading] = useState(false)
   const [tasksLoading, setTasksLoading] = useState(false)
   const [message, setMessage] = useState('')
@@ -54,609 +77,373 @@ export default function Home() {
   const [manualMinutes, setManualMinutes] = useState('')
   const [manualMemo, setManualMemo] = useState('')
   const [savingManualLog, setSavingManualLog] = useState(false)
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null)
 
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [editingMinutes, setEditingMinutes] = useState('')
+  const [editingStartTime, setEditingStartTime] = useState('')
+  const [editingEndTime, setEditingEndTime] = useState('')
+  const [editingMemo, setEditingMemo] = useState('')
   const [updatingLog, setUpdatingLog] = useState(false)
   const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const fetchLogs = useCallback(async () => {
-    if (!isLoggedIn || !repmeCode) {
-      setLogs([])
-      setLoading(false)
-      return
-    }
-
+    if (!isLoggedIn || !repmeCode) { setLogs([]); setLoading(false); return }
     setLoading(true)
     setMessage('')
-
     const { data, error } = await supabase
-      .from('work_logs')
-      .select('*')
-      .eq('repme_code', repmeCode)
+      .from('work_logs').select('*').eq('repme_code', repmeCode)
       .order('created_at', { ascending: false })
-
-    if (error) {
-      console.error(error)
-      setMessage('取得失敗｜Fetch failed')
-      setLogs([])
-      setLoading(false)
-      return
-    }
-
+    if (error) { console.error(error); setMessage('取得失敗｜Fetch failed'); setLogs([]); setLoading(false); return }
     setLogs(data || [])
     setLoading(false)
   }, [isLoggedIn, repmeCode])
 
   const fetchTodayTasks = useCallback(async () => {
-    if (!isLoggedIn || !repmeCode) {
-      setTodayTasks([])
-      setTasksLoading(false)
-      return
-    }
-
+    if (!isLoggedIn || !repmeCode) { setTodayTasks([]); setTasksLoading(false); return }
     setTasksLoading(true)
-
     try {
-      const todayStart = new Date()
-      todayStart.setHours(0, 0, 0, 0)
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+      const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999)
+      const todayStartUTC = new Date(todayStart.getTime() - todayStart.getTimezoneOffset() * 60000)
+      const todayEndUTC = new Date(todayEnd.getTime() - todayEnd.getTimezoneOffset() * 60000)
+      const nowJST = new Date(Date.now() + 9 * 60 * 60 * 1000)
+      const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
 
-      const todayEnd = new Date()
-      todayEnd.setHours(23, 59, 59, 999)
-
-      const { data, error } = await supabase
+      const { data: scheduleTasks, error: scheduleError } = await supabase
         .from('schedule_tasks')
-        .select('id, title, plan_type, scheduled_start_at, target_minutes, status, repme_code')
-        .eq('repme_code', repmeCode)
-        .gte('scheduled_start_at', todayStart.toISOString())
-        .lte('scheduled_start_at', todayEnd.toISOString())
+        .select('id, title, source_type, plan_type, start_time, end_time, scheduled_start_at, status, repme_code, target_minutes')
+        .eq('repme_code', repmeCode).eq('plan_type', 'schedule')
+        .gte('scheduled_start_at', todayStartUTC.toISOString())
+        .lte('scheduled_start_at', todayEndUTC.toISOString())
         .order('scheduled_start_at', { ascending: true })
+      if (scheduleError) console.error(scheduleError)
 
-      if (error) {
-        console.error(error)
-        setTodayTasks([])
-        return
-      }
+      const { data: startTasks, error: startError } = await supabase
+        .from('schedule_tasks')
+        .select('id, title, source_type, plan_type, start_time, end_time, scheduled_start_at, status, repme_code, target_minutes')
+        .eq('repme_code', repmeCode).eq('plan_type', 'start').eq('task_date', todayStr)
+        .order('created_at', { ascending: true })
+      if (startError) console.error(startError)
 
-      setTodayTasks(data || [])
+      const tasks = [...(startTasks || []), ...(scheduleTasks || [])]
+      if (tasks.length === 0) { setTodayTasks([]); return }
+
+      const taskIds = tasks.map((t) => t.id)
+      const { data: taskLogs, error: logError } = await supabase
+        .from('work_logs').select('id, task_id, start_time, end_time, minutes, type')
+        .eq('repme_code', repmeCode).in('task_id', taskIds)
+        .order('start_time', { ascending: true })
+      if (logError) console.error(logError)
+
+      setTodayTasks(tasks.map((task) => ({
+        ...task,
+        logs: (taskLogs || []).filter((log) => log.task_id === task.id)
+      })))
     } catch (error) {
-      console.error(error)
-      setTodayTasks([])
+      console.error(error); setTodayTasks([])
     } finally {
       setTasksLoading(false)
     }
   }, [isLoggedIn, repmeCode])
 
-  useEffect(() => {
-    fetchLogs()
-  }, [fetchLogs])
+  const fetchAllTasks = useCallback(async () => {
+    if (!isLoggedIn || !repmeCode) { setAllTasks([]); return }
+    const { data, error } = await supabase
+      .from('schedule_tasks')
+      .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
+      .eq('repme_code', repmeCode).order('scheduled_start_at', { ascending: false })
+    if (error) { console.error(error); setAllTasks([]); return }
+    setAllTasks(data || [])
+  }, [isLoggedIn, repmeCode])
 
-  useEffect(() => {
-    fetchTodayTasks()
-  }, [fetchTodayTasks])
+  useEffect(() => { fetchLogs() }, [fetchLogs])
+  useEffect(() => { fetchTodayTasks() }, [fetchTodayTasks])
+  useEffect(() => { fetchAllTasks() }, [fetchAllTasks])
 
   const handleLogin = async () => {
-    if (!repmeCode || !password) {
-      setMessage('コードとパスワードを入力｜Enter code and password')
-      return
-    }
-
-    setLoading(true)
-    setMessage('')
-
+    if (!repmeCode || !password) { setMessage('コードとパスワードを入力｜Enter code and password'); return }
+    setLoading(true); setMessage('')
     const code = repmeCode.trim().toUpperCase()
-
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('repme_code', code)
-      .single()
-
-    if (error || !data) {
-      setMessage('ユーザーが存在しません｜User not found')
-      setIsLoggedIn(false)
-      setUserId('')
-      setLoading(false)
-      return
-    }
-
-    if (data.password !== password) {
-      setMessage('パスワードが違います｜Wrong password')
-      setIsLoggedIn(false)
-      setUserId('')
-      setLoading(false)
-      return
-    }
-
-    setRepmeCode(code)
-    setUserId(data.user_id || '')
-    setIsLoggedIn(true)
-    setMessage('')
-    setLoading(false)
+    const { data, error } = await supabase.from('users').select('*').eq('repme_code', code).single()
+    if (error || !data) { setMessage('ユーザーが存在しません｜User not found'); setIsLoggedIn(false); setUserId(''); setLoading(false); return }
+    if (data.password !== password) { setMessage('パスワードが違います｜Wrong password'); setIsLoggedIn(false); setUserId(''); setLoading(false); return }
+    setRepmeCode(code); setUserId(data.user_id || ''); setIsLoggedIn(true); setMessage(''); setLoading(false)
   }
 
   const handleLogout = () => {
-    setIsLoggedIn(false)
-    setRepmeCode('')
-    setPassword('')
-    setUserId('')
-    setLogs([])
-    setTodayTasks([])
-    setMessage('')
-    setLoading(false)
-    setTasksLoading(false)
-    setManualMinutes('')
-    setManualMemo('')
-    setSavingManualLog(false)
-    setEditingId(null)
-    setEditingMinutes('')
-    setUpdatingLog(false)
-    setDeletingId(null)
+    setIsLoggedIn(false); setRepmeCode(''); setPassword(''); setUserId('')
+    setLogs([]); setTodayTasks([]); setAllTasks([]); setMessage('')
+    setLoading(false); setTasksLoading(false)
+    setManualMinutes(''); setManualMemo(''); setSavingManualLog(false); setSelectedTaskId(null)
+    setEditingId(null); setEditingStartTime(''); setEditingEndTime(''); setEditingMemo('')
+    setUpdatingLog(false); setDeletingId(null)
   }
 
   const handleManualLogSubmit = async () => {
-    if (!manualMinutes.trim()) {
-      setMessage('時間を入力して｜Enter minutes')
-      return
-    }
-
+    if (!manualMinutes.trim()) { setMessage('時間を入力して｜Enter minutes'); return }
     const minutesNumber = Number(manualMinutes)
-
-    if (Number.isNaN(minutesNumber) || minutesNumber <= 0) {
-      setMessage('時間は1以上の数字で入力｜Minutes must be 1 or more')
-      return
-    }
-
-    if (!repmeCode) {
-      setMessage('REPMEコードがありません｜No REPME code')
-      return
-    }
-
-    if (!userId) {
-      setMessage('user_id が見つかりません｜user_id not found')
-      return
-    }
-
+    if (Number.isNaN(minutesNumber) || minutesNumber <= 0) { setMessage('時間は1以上の数字で入力｜Minutes must be 1 or more'); return }
+    if (!repmeCode) { setMessage('REPMEコードがありません｜No REPME code'); return }
+    if (!userId) { setMessage('user_id が見つかりません｜user_id not found'); return }
     try {
-      setSavingManualLog(true)
-      setMessage('')
-
+      setSavingManualLog(true); setMessage('')
       const now = new Date().toISOString()
-
-      const { error } = await supabase.from('work_logs').insert([
-        {
-          user_name: repmeCode,
-          minutes: minutesNumber,
-          memo: manualMemo.trim() || null,
-          type: 'manual',
-          repme_code: repmeCode,
-          user_id: userId,
-          start_time: now,
-          end_time: now
-        }
-      ])
-
-      if (error) {
-        console.error(error)
-        setMessage('手動記録の保存に失敗｜Manual log save failed')
-        return
-      }
-
-      setManualMinutes('')
-      setManualMemo('')
+      const { error } = await supabase.from('work_logs').insert([{
+        user_name: repmeCode, minutes: minutesNumber, memo: manualMemo.trim() || null,
+        type: 'manual', repme_code: repmeCode, user_id: userId,
+        start_time: now, end_time: now, task_id: selectedTaskId ?? null
+      }])
+      if (error) { console.error(error); setMessage('手動記録の保存に失敗｜Manual log save failed'); return }
+      setManualMinutes(''); setManualMemo(''); setSelectedTaskId(null)
       setMessage('手動記録を保存しました｜Manual log saved')
-
-      await fetchLogs()
-      await fetchTodayTasks()
-    } catch (error) {
-      console.error(error)
-      setMessage('エラーが発生しました｜Something went wrong')
-    } finally {
-      setSavingManualLog(false)
-    }
+      await fetchLogs(); await fetchTodayTasks()
+    } catch (error) { console.error(error); setMessage('エラーが発生しました｜Something went wrong') }
+    finally { setSavingManualLog(false) }
   }
 
   const handleStartEdit = (log: WorkLog) => {
     setEditingId(log.id)
-    setEditingMinutes(String(log.minutes ?? ''))
+    setEditingStartTime(log.start_time ? toLocalInputValue(log.start_time) : '')
+    setEditingEndTime(log.end_time ? toLocalInputValue(log.end_time) : '')
+    setEditingMemo(log.memo ?? '')
     setMessage('')
   }
 
   const handleCancelEdit = () => {
-    setEditingId(null)
-    setEditingMinutes('')
-    setMessage('')
+    setEditingId(null); setEditingStartTime(''); setEditingEndTime(''); setEditingMemo(''); setMessage('')
   }
 
-  const handleUpdateMinutes = async (id: number) => {
-    const minutesNumber = Number(editingMinutes)
-
-    if (!editingMinutes.trim()) {
-      setMessage('時間を入力して｜Enter minutes')
-      return
-    }
-
-    if (Number.isNaN(minutesNumber) || minutesNumber <= 0) {
-      setMessage('時間は1以上の数字で入力｜Minutes must be 1 or more')
-      return
-    }
-
+  const handleUpdateLog = async (id: number) => {
+    if (!editingStartTime) { setMessage('開始時刻を入力して｜Enter start time'); return }
+    const startUTC = toUTC(editingStartTime)
+    const endUTC = editingEndTime ? toUTC(editingEndTime) : null
+    const minutes = editingStartTime && editingEndTime ? calcMinutes(editingStartTime, editingEndTime) : null
     try {
-      setUpdatingLog(true)
-      setMessage('')
-
-      const { error } = await supabase
-        .from('work_logs')
-        .update({ minutes: minutesNumber })
-        .eq('id', id)
-        .eq('repme_code', repmeCode)
-
-      if (error) {
-        console.error(error)
-        setMessage('更新失敗｜Update failed')
-        return
-      }
-
-      setEditingId(null)
-      setEditingMinutes('')
-      setMessage('時間を更新しました｜Minutes updated')
-
-      await fetchLogs()
-    } catch (error) {
-      console.error(error)
-      setMessage('エラーが発生しました｜Something went wrong')
-    } finally {
-      setUpdatingLog(false)
-    }
+      setUpdatingLog(true); setMessage('')
+      const { error } = await supabase.from('work_logs')
+        .update({ start_time: startUTC, end_time: endUTC, memo: editingMemo.trim() || null, minutes, type: 'edited' })
+        .eq('id', id).eq('repme_code', repmeCode)
+      if (error) { console.error(error); setMessage('更新失敗｜Update failed'); return }
+      setEditingId(null); setEditingStartTime(''); setEditingEndTime(''); setEditingMemo('')
+      setMessage('ログを更新しました｜Log updated')
+      await fetchLogs(); await fetchTodayTasks()
+    } catch (e) { console.error(e); setMessage('エラーが発生しました｜Something went wrong') }
+    finally { setUpdatingLog(false) }
   }
 
   const handleDelete = async (id: number) => {
     try {
-      setDeletingId(id)
-      setMessage('')
-
-      const { error } = await supabase
-        .from('work_logs')
-        .delete()
-        .eq('id', id)
-        .eq('repme_code', repmeCode)
-
-      if (error) {
-        console.error(error)
-        setMessage('削除失敗｜Delete failed')
-        return
-      }
-
-      if (editingId === id) {
-        setEditingId(null)
-        setEditingMinutes('')
-      }
-
+      setDeletingId(id); setMessage('')
+      const { error } = await supabase.from('work_logs').delete().eq('id', id).eq('repme_code', repmeCode)
+      if (error) { console.error(error); setMessage('削除失敗｜Delete failed'); return }
+      if (editingId === id) { setEditingId(null); setEditingStartTime(''); setEditingEndTime(''); setEditingMemo('') }
       setMessage('ログを削除しました｜Log deleted')
-      await fetchLogs()
-    } catch (error) {
-      console.error(error)
-      setMessage('エラーが発生しました｜Something went wrong')
-    } finally {
-      setDeletingId(null)
-    }
+      await fetchLogs(); await fetchTodayTasks()
+    } catch (error) { console.error(error); setMessage('エラーが発生しました｜Something went wrong') }
+    finally { setDeletingId(null) }
   }
 
-  const totalMinutes = useMemo(() => {
-    return logs.reduce((sum, log) => sum + (log.minutes || 0), 0)
-  }, [logs])
+  const totalMinutes = useMemo(() => logs.reduce((sum, log) => sum + (log.minutes || 0), 0), [logs])
 
   const todayMinutes = useMemo(() => {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-
+    const today = new Date(); today.setHours(0, 0, 0, 0)
     return logs.reduce((sum, log) => {
-      const d = new Date(log.start_time || log.created_at)
-      d.setHours(0, 0, 0, 0)
+      const d = new Date((log.start_time || log.created_at) + 'Z'); d.setHours(0, 0, 0, 0)
       return d.getTime() === today.getTime() ? sum + (log.minutes || 0) : sum
     }, 0)
   }, [logs])
 
   const weekMinutes = useMemo(() => {
-    const today = new Date()
-    const day = today.getDay()
+    const today = new Date(); const day = today.getDay()
     const diffFromMonday = day === 0 ? 6 : day - 1
-
-    const weekStart = new Date(today)
-    weekStart.setDate(today.getDate() - diffFromMonday)
-    weekStart.setHours(0, 0, 0, 0)
-
+    const weekStart = new Date(today); weekStart.setDate(today.getDate() - diffFromMonday); weekStart.setHours(0, 0, 0, 0)
     return logs.reduce((sum, log) => {
-      const d = new Date(log.start_time || log.created_at)
+      const d = new Date((log.start_time || log.created_at) + 'Z')
       return d >= weekStart ? sum + (log.minutes || 0) : sum
     }, 0)
   }, [logs])
 
   const streak = useMemo(() => {
     if (logs.length === 0) return 0
-
-    const dateSet = new Set(
-      logs.map((log) => {
-        const d = new Date(log.start_time || log.created_at)
-        d.setHours(0, 0, 0, 0)
-        return d.getTime()
-      })
-    )
-
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-
-    const yesterday = new Date(today)
-    yesterday.setDate(yesterday.getDate() - 1)
-
-    const hasToday = dateSet.has(today.getTime())
-    const hasYesterday = dateSet.has(yesterday.getTime())
-
+    const dateSet = new Set(logs.map((log) => {
+      const d = new Date((log.start_time || log.created_at) + 'Z'); d.setHours(0, 0, 0, 0); return d.getTime()
+    }))
+    const today = new Date(); today.setHours(0, 0, 0, 0)
+    const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1)
+    const hasToday = dateSet.has(today.getTime()); const hasYesterday = dateSet.has(yesterday.getTime())
     if (!hasToday && !hasYesterday) return 0
-
-    let count = 0
-    const current = new Date(hasToday ? today : yesterday)
-
-    while (dateSet.has(current.getTime())) {
-      count++
-      current.setDate(current.getDate() - 1)
-    }
-
+    let count = 0; const current = new Date(hasToday ? today : yesterday)
+    while (dateSet.has(current.getTime())) { count++; current.setDate(current.getDate() - 1) }
     return count
   }, [logs])
 
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
-
-    logs
-      .slice()
-      .reverse()
-      .forEach((log) => {
-        const baseDate = log.start_time || log.created_at
-        const date = new Date(baseDate)
-        const key = `${date.getMonth() + 1}/${date.getDate()}`
-
-        grouped[key] = (grouped[key] || 0) + (log.minutes || 0)
-      })
-
-    return Object.entries(grouped).map(([date, minutes]) => ({
-      date,
-      minutes
-    }))
+    logs.slice().reverse().forEach((log) => {
+      const date = new Date((log.start_time || log.created_at) + 'Z')
+      const key = `${date.getMonth() + 1}/${date.getDate()}`
+      grouped[key] = (grouped[key] || 0) + (log.minutes || 0)
+    })
+    return Object.entries(grouped).map(([date, minutes]) => ({ date, minutes }))
   }, [logs])
 
+  const formatTime = (timeStr: string | null | undefined) => {
+    if (!timeStr) return '-'
+    return new Date(timeStr + 'Z').toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' })
+  }
+
+  const formatDate = (timeStr: string | null | undefined) => {
+    if (!timeStr) return '-'
+    return new Date(timeStr + 'Z').toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit', timeZone: 'Asia/Tokyo' })
+  }
+
+  const formatTimeRange = (start: string | null | undefined, end: string | null | undefined) => {
+    const startStr = formatTime(start)
+    if (!end) return `${startStr}〜`
+    return `${startStr}〜${formatTime(end)}`
+  }
+
+  const planTypeLabel = (plan_type: string | null | undefined) => {
+    if (plan_type === 'start') return 'Start Plan'
+    if (plan_type === 'schedule') return 'Schedule Plan'
+    return plan_type || '-'
+  }
+
+  const statusColor = (status: string | null | undefined) => {
+    switch (status) {
+      case 'planned': return '#6A6A6A'
+      case 'in_progress': return '#A8C5A0'
+      case 'completed': return '#7A9EC0'
+      case 'late': return '#C0A07A'
+      case 'missed': return '#C07A7A'
+      default: return '#6A6A6A'
+    }
+  }
+
+  const getAchievementStatus = (task: ScheduleTask) => {
+    if (task.plan_type !== 'start' || !task.target_minutes) return null
+    const logged = (task.logs || []).reduce((sum, l) => sum + (l.minutes || 0), 0)
+    const target = task.target_minutes
+    const pct = Math.min(100, Math.round((logged / target) * 100))
+    return { logged, target, pct }
+  }
+
   return (
-    <main
-      style={{
-        position: 'relative',
-        minHeight: '100vh',
-        overflow: 'hidden',
-        background: '#030303',
-        color: '#EAEAEA',
-        fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif'
-      }}
-    >
-      <div
-        style={{
-          position: 'absolute',
-          inset: 0,
-          pointerEvents: 'none',
-          background: `
-            radial-gradient(circle at 18% 18%, rgba(255,255,255,0.13) 0%, rgba(255,255,255,0.04) 12%, transparent 34%),
-            radial-gradient(circle at 82% 68%, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.05) 13%, transparent 34%),
-            linear-gradient(135deg, transparent 0%, rgba(255,255,255,0.06) 18%, transparent 28%),
-            linear-gradient(315deg, transparent 0%, rgba(255,255,255,0.05) 20%, transparent 30%),
-            repeating-linear-gradient(
-              125deg,
-              transparent 0px,
-              transparent 10px,
-              rgba(255,255,255,0.03) 11px,
-              transparent 17px,
-              transparent 28px
-            ),
-            radial-gradient(rgba(255,255,255,0.08) 0.8px, transparent 1px)
-          `,
-          backgroundSize: `
-            100% 100%,
-            100% 100%,
-            100% 100%,
-            100% 100%,
-            100% 100%,
-            4px 4px
-          `,
-          opacity: 1
-        }}
-      />
+    <main style={{ position: 'relative', minHeight: '100vh', overflow: 'hidden', background: '#030303', color: '#EAEAEA', fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif' }}>
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', background: `radial-gradient(circle at 18% 18%, rgba(255,255,255,0.13) 0%, rgba(255,255,255,0.04) 12%, transparent 34%), radial-gradient(circle at 82% 68%, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.05) 13%, transparent 34%), linear-gradient(135deg, transparent 0%, rgba(255,255,255,0.06) 18%, transparent 28%), linear-gradient(315deg, transparent 0%, rgba(255,255,255,0.05) 20%, transparent 30%), repeating-linear-gradient(125deg, transparent 0px, transparent 10px, rgba(255,255,255,0.03) 11px, transparent 17px, transparent 28px), radial-gradient(rgba(255,255,255,0.08) 0.8px, transparent 1px)`, backgroundSize: `100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 100%, 4px 4px`, opacity: 1 }} />
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', background: `linear-gradient(160deg, rgba(255,255,255,0.06), transparent 18%, transparent 78%, rgba(255,255,255,0.05)), radial-gradient(circle at 24% 26%, rgba(255,255,255,0.08), transparent 22%), radial-gradient(circle at 78% 70%, rgba(255,255,255,0.08), transparent 22%)`, filter: 'blur(22px)', opacity: 0.95 }} />
 
-      <div
-        style={{
-          position: 'absolute',
-          inset: 0,
-          pointerEvents: 'none',
-          background: `
-            linear-gradient(160deg, rgba(255,255,255,0.06), transparent 18%, transparent 78%, rgba(255,255,255,0.05)),
-            radial-gradient(circle at 24% 26%, rgba(255,255,255,0.08), transparent 22%),
-            radial-gradient(circle at 78% 70%, rgba(255,255,255,0.08), transparent 22%)
-          `,
-          filter: 'blur(22px)',
-          opacity: 0.95
-        }}
-      />
-
-      <div
-        style={{
-          position: 'relative',
-          zIndex: 1,
-          width: '100%',
-          maxWidth: '980px',
-          margin: '0 auto',
-          padding: '28px 18px'
-        }}
-      >
-        <h1
-          style={{
-            fontSize: '28px',
-            fontWeight: 700,
-            letterSpacing: '1.2px',
-            marginBottom: '28px',
-            textAlign: 'center'
-          }}
-        >
-          REPME | Focus Gym
-        </h1>
+      <div style={{ position: 'relative', zIndex: 1, width: '100%', maxWidth: '980px', margin: '0 auto', padding: '28px 18px' }}>
+        <h1 style={{ fontSize: '28px', fontWeight: 700, letterSpacing: '1.2px', marginBottom: '28px', textAlign: 'center' }}>REPME | Focus Gym</h1>
 
         {!isLoggedIn ? (
-          <div
-            style={{
-              width: '100%',
-              maxWidth: '360px',
-              margin: '0 auto',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: '10px',
-              padding: '18px',
-              background: 'rgba(17,17,17,0.72)',
-              backdropFilter: 'blur(6px)'
-            }}
-          >
-            <div
-              style={{
-                fontSize: '12px',
-                color: '#9A9A9A',
-                marginBottom: '14px'
-              }}
-            >
-              ログイン｜Login
-            </div>
-
-            <input
-              value={repmeCode}
-              onChange={(e) => setRepmeCode(e.target.value)}
-              placeholder="REPMEコード｜REPME Code"
-              style={inputStyle}
-            />
-
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="パスワード｜Password"
-              style={inputStyle}
-            />
-
-            <button
-              onClick={handleLogin}
-              disabled={loading}
-              style={buttonStyle}
-            >
-              {loading ? 'ログイン中｜Loading' : 'ログイン｜Login'}
-            </button>
-
-            {message && (
-              <p
-                style={{
-                  color: '#B8B8B8',
-                  marginTop: '12px',
-                  fontSize: '12px',
-                  lineHeight: 1.5
-                }}
-              >
-                {message}
-              </p>
-            )}
+          <div style={{ width: '100%', maxWidth: '360px', margin: '0 auto', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '18px', background: 'rgba(17,17,17,0.72)', backdropFilter: 'blur(6px)' }}>
+            <div style={{ fontSize: '12px', color: '#9A9A9A', marginBottom: '14px' }}>ログイン｜Login</div>
+            <input value={repmeCode} onChange={(e) => setRepmeCode(e.target.value)} placeholder="REPMEコード｜REPME Code" style={inputStyle} />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="パスワード｜Password" style={inputStyle} />
+            <button onClick={handleLogin} disabled={loading} style={buttonStyle}>{loading ? 'ログイン中｜Loading' : 'ログイン｜Login'}</button>
+            {message && <p style={{ color: '#B8B8B8', marginTop: '12px', fontSize: '12px', lineHeight: 1.5 }}>{message}</p>}
           </div>
         ) : (
           <>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '12px',
-                marginBottom: '14px',
-                flexWrap: 'wrap'
-              }}
-            >
-              <p
-                style={{
-                  fontSize: '12px',
-                  color: '#9A9A9A',
-                  margin: 0
-                }}
-              >
-                現在のコード｜Current Code : {repmeCode}
-              </p>
-
-              <button
-                onClick={handleLogout}
-                style={{
-                  padding: '8px 12px',
-                  background: 'rgba(17,17,17,0.72)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  borderRadius: '8px',
-                  color: '#EAEAEA',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                  backdropFilter: 'blur(6px)'
-                }}
-              >
-                ログアウト｜Logout
-              </button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '14px', flexWrap: 'wrap' }}>
+              <p style={{ fontSize: '12px', color: '#9A9A9A', margin: 0 }}>現在のコード｜Current Code : {repmeCode}</p>
+              <button onClick={handleLogout} style={{ padding: '8px 12px', background: 'rgba(17,17,17,0.72)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', color: '#EAEAEA', cursor: 'pointer', fontSize: '12px', backdropFilter: 'blur(6px)' }}>ログアウト｜Logout</button>
             </div>
 
+            {/* 今日のtask */}
             <section style={glassBox}>
               <div style={sectionLabel}>今日のtask｜Today&apos;s Tasks</div>
+              {tasksLoading ? <p style={emptyText}>読み込み中｜Loading</p>
+                : todayTasks.length === 0 ? <p style={emptyText}>今日のtaskはまだありません｜No tasks for today</p>
+                : (
+                  <div>
+                    {todayTasks.map((task) => {
+                      const achievement = getAchievementStatus(task)
+                      return (
+                        <div key={task.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '14px 0' }}>
+                          <div style={{ fontSize: '15px', fontWeight: 600, color: '#EAEAEA', marginBottom: '6px' }}>
+                            {task.title?.trim() ? task.title : '作業'}
+                          </div>
+                          <div style={{ fontSize: '12px', color: '#B8B8B8', lineHeight: 1.7, marginBottom: '8px' }}>
+                            {task.plan_type === 'start' ? (
+                              <div>Plan: Start Plan</div>
+                            ) : (
+                              <>
+                                <div>{formatTimeRange(task.scheduled_start_at, task.end_time)}</div>
+                                <div>Plan: {planTypeLabel(task.plan_type)}</div>
+                              </>
+                            )}
+                          </div>
 
-              {tasksLoading ? (
-                <p style={emptyText}>読み込み中｜Loading</p>
-              ) : todayTasks.length === 0 ? (
-                <p style={emptyText}>今日のtaskはまだありません｜No tasks for today</p>
-              ) : (
-                <div>
-                  {todayTasks.map((task) => (
-                    <div
-                      key={task.id}
-                      style={{
-                        borderBottom: '1px solid rgba(255,255,255,0.07)',
-                        padding: '12px 0',
-                        fontSize: '13px',
-                        color: '#D8D8D8'
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: '15px',
-                          fontWeight: 600,
-                          marginBottom: '6px',
-                          color: '#EAEAEA'
-                        }}
-                      >
-                        {task.title?.trim() ? task.title : '作業'}
-                      </div>
+                          {achievement && (
+                            <div style={{ marginBottom: '10px' }}>
+                              <div style={{ fontSize: '12px', color: '#B8B8B8', marginBottom: '6px' }}>
+                                目標：{achievement.target}分　記録：{achievement.logged}分
+                              </div>
+                              <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.08)', borderRadius: '2px', overflow: 'hidden' }}>
+                                <div style={{ height: '100%', width: `${achievement.pct}%`, background: achievement.pct >= 100 ? '#7A9EC0' : '#A8C5A0', borderRadius: '2px', transition: 'width 0.3s ease' }} />
+                              </div>
+                              <div style={{ fontSize: '11px', color: achievement.pct >= 100 ? '#7A9EC0' : '#7A7A7A', marginTop: '4px' }}>
+                                {achievement.pct >= 100 ? '達成｜Achieved' : `${achievement.pct}%`}
+                              </div>
+                            </div>
+                          )}
 
-                      <div style={{ fontSize: '12px', color: '#B8B8B8', lineHeight: 1.7 }}>
-                        <div>Plan: {task.plan_type || '-'}</div>
-                        <div>
-                          Start:{' '}
-                          {task.scheduled_start_at
-                            ? new Date(task.scheduled_start_at).toLocaleString()
-                            : '-'}
+                          <div style={{ display: 'inline-block', fontSize: '11px', color: statusColor(task.status), padding: '3px 7px', border: `1px solid ${statusColor(task.status)}`, borderRadius: '999px', background: 'rgba(255,255,255,0.03)', marginBottom: task.logs && task.logs.length > 0 ? '12px' : '0' }}>
+                            {task.status || 'planned'}
+                          </div>
+
+                          {task.logs && task.logs.length > 0 && (
+                            <div style={{ borderLeft: '2px solid rgba(255,255,255,0.1)', paddingLeft: '12px', marginTop: '8px' }}>
+                              {task.logs.map((log) => (
+                                <div key={log.id} style={{ fontSize: '12px', color: '#B8B8B8', lineHeight: 1.8, marginBottom: '6px', padding: '8px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+                                  <div style={{ color: '#EAEAEA', fontWeight: 500, marginBottom: '2px' }}>{log.minutes ?? 0}分</div>
+                                  <div>{formatTime(log.start_time)} → {formatTime(log.end_time)}</div>
+                                  <div style={{ display: 'inline-block', fontSize: '10px', color: '#8F8F8F', padding: '2px 6px', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '999px', background: 'rgba(255,255,255,0.03)', marginTop: '4px' }}>
+                                    {log.type === 'manual' ? '[MANUAL]' : log.type === 'edited' ? '[EDITED]' : '[REALTIME]'}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                        <div>Target: {task.target_minutes ?? 0}分</div>
-                      </div>
+                      )
+                    })}
+                  </div>
+                )}
+            </section>
 
-                      <div
-                        style={{
-                          display: 'inline-block',
-                          fontSize: '11px',
-                          color: '#8F8F8F',
-                          marginTop: '8px',
-                          padding: '3px 7px',
-                          border: '1px solid rgba(255,255,255,0.08)',
-                          borderRadius: '999px',
-                          background: 'rgba(255,255,255,0.03)'
-                        }}
-                      >
-                        STATUS: {task.status || 'planned'}
+            {/* stats */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '18px' }}>
+              <Stat label="合計時間｜Total" value={`${totalMinutes}分`} />
+              <Stat label="今日｜Today" value={`${todayMinutes}分`} />
+              <Stat label="今週｜This Week" value={`${weekMinutes}分`} />
+              <Stat label="連続日数｜Streak" value={`${streak}日`} />
+            </div>
+
+            {/* plan確認 */}
+            <section style={glassBox}>
+              <div style={sectionLabel}>plan確認｜Plans</div>
+              {allTasks.length === 0 ? <p style={emptyText}>planはまだありません｜No plans yet</p> : (
+                <div>
+                  {allTasks.map((task) => (
+                    <div key={task.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '12px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' }}>
+                      <div>
+                        <div style={{ fontSize: '14px', fontWeight: 600, color: '#EAEAEA', marginBottom: '4px' }}>{task.title?.trim() ? task.title : '作業'}</div>
+                        <div style={{ fontSize: '12px', color: '#B8B8B8', lineHeight: 1.6 }}>
+                          {task.plan_type === 'start' ? (
+                            <div>目標：{task.target_minutes}分</div>
+                          ) : (
+                            <>
+                              <div>{formatDate(task.scheduled_start_at)} {formatTimeRange(task.scheduled_start_at, task.end_time)}</div>
+                              <div>{planTypeLabel(task.plan_type)}</div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ display: 'inline-block', fontSize: '11px', color: statusColor(task.status), padding: '3px 7px', border: `1px solid ${statusColor(task.status)}`, borderRadius: '999px', background: 'rgba(255,255,255,0.03)', whiteSpace: 'nowrap' }}>
+                        {task.status || 'planned'}
                       </div>
                     </div>
                   ))}
@@ -664,232 +451,100 @@ export default function Home() {
               )}
             </section>
 
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-                gap: '10px',
-                marginBottom: '18px'
-              }}
-            >
-              <Stat label="合計時間｜Total" value={`${totalMinutes}分`} />
-              <Stat label="今日｜Today" value={`${todayMinutes}分`} />
-              <Stat label="今週｜This Week" value={`${weekMinutes}分`} />
-              <Stat label="連続日数｜Streak" value={`${streak}日`} />
-            </div>
-
+            {/* 手動記録 */}
             <section style={glassBox}>
               <div style={sectionLabel}>手動記録｜Manual Log</div>
-
               <div style={{ display: 'grid', gap: '10px' }}>
-                <input
-                  type="number"
-                  min="1"
-                  value={manualMinutes}
-                  onChange={(e) => setManualMinutes(e.target.value)}
-                  placeholder="時間（分）｜Minutes"
-                  style={inputStyle}
-                />
-
-                <textarea
-                  value={manualMemo}
-                  onChange={(e) => setManualMemo(e.target.value)}
-                  placeholder="メモ（任意）｜Memo (optional)"
-                  rows={3}
-                  style={textareaStyle}
-                />
-
-                <button
-                  onClick={handleManualLogSubmit}
-                  disabled={savingManualLog}
-                  style={buttonStyle}
-                >
-                  {savingManualLog ? '保存中｜Saving' : '保存する｜Save'}
-                </button>
+                <select value={selectedTaskId ?? ''} onChange={(e) => setSelectedTaskId(e.target.value ? Number(e.target.value) : null)}
+                  style={{ width: '100%', padding: '10px 12px', background: 'rgba(3,3,3,0.88)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', color: '#EAEAEA', fontSize: '14px', outline: 'none', boxSizing: 'border-box' }}>
+                  <option value=''>taskに紐付けない｜No task</option>
+                  {todayTasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.title?.trim() ? task.title : '作業'}
+                      {task.plan_type === 'start' ? ` (目標${task.target_minutes}分)` : ` (${formatTimeRange(task.scheduled_start_at, task.end_time)})`}
+                    </option>
+                  ))}
+                </select>
+                <input type="number" min="1" value={manualMinutes} onChange={(e) => setManualMinutes(e.target.value)} placeholder="時間（分）｜Minutes" style={inputStyle} />
+                <textarea value={manualMemo} onChange={(e) => setManualMemo(e.target.value)} placeholder="メモ（任意）｜Memo (optional)" rows={3} style={textareaStyle} />
+                <button onClick={handleManualLogSubmit} disabled={savingManualLog} style={buttonStyle}>{savingManualLog ? '保存中｜Saving' : '保存する｜Save'}</button>
               </div>
             </section>
 
+            {/* グラフ */}
             <section style={glassBox}>
               <div style={sectionLabel}>日別作業｜Daily Work</div>
-
-              {loading ? (
-                <p style={emptyText}>読み込み中｜Loading</p>
-              ) : chartData.length === 0 ? (
-                <p style={emptyText}>データなし｜No data</p>
-              ) : (
-                <div style={{ width: '100%', height: 240 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData}>
-                      <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                      <XAxis dataKey="date" stroke="#7A7A7A" tickLine={false} axisLine={false} />
-                      <YAxis stroke="#7A7A7A" tickLine={false} axisLine={false} />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: '#111111',
-                          border: '1px solid rgba(255,255,255,0.08)',
-                          borderRadius: '8px',
-                          color: '#EAEAEA'
-                        }}
-                        formatter={(value) => [`${value}分`, '作業時間｜Work']}
-                      />
-                      <Bar dataKey="minutes" fill="#EAEAEA" radius={[2, 2, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
+              {loading ? <p style={emptyText}>読み込み中｜Loading</p>
+                : chartData.length === 0 ? <p style={emptyText}>データなし｜No data</p>
+                : (
+                  <div style={{ width: '100%', height: 240 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={chartData}>
+                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                        <XAxis dataKey="date" stroke="#7A7A7A" tickLine={false} axisLine={false} />
+                        <YAxis stroke="#7A7A7A" tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ backgroundColor: '#111111', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', color: '#EAEAEA' }} formatter={(value) => [`${value}分`, '作業時間｜Work']} />
+                        <Bar dataKey="minutes" fill="#EAEAEA" radius={[2, 2, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
             </section>
 
+            {/* 作業ログ */}
             <section style={glassBox}>
               <div style={sectionLabel}>作業ログ｜Work Logs</div>
-
-              {message && (
-                <p
-                  style={{
-                    color: '#B8B8B8',
-                    marginBottom: '10px',
-                    fontSize: '12px'
-                  }}
-                >
-                  {message}
-                </p>
-              )}
-
-              {loading ? (
-                <p style={emptyText}>読み込み中｜Loading</p>
-              ) : logs.length === 0 ? (
-                <p style={emptyText}>ログがまだありません｜No logs yet</p>
-              ) : (
-                <div>
-                  {logs.map((log) => {
-                    const isEditing = editingId === log.id
-                    const typeLabel = log.type === 'manual' ? '[MANUAL]' : '[REALTIME]'
-
-                    return (
-                      <div
-                        key={log.id}
-                        style={{
-                          borderBottom: '1px solid rgba(255,255,255,0.07)',
-                          padding: '12px 0',
-                          fontSize: '13px',
-                          color: '#D8D8D8'
-                        }}
-                      >
-                        {isEditing ? (
-                          <div style={{ marginBottom: '8px' }}>
-                            <input
-                              type="number"
-                              min="1"
-                              value={editingMinutes}
-                              onChange={(e) => setEditingMinutes(e.target.value)}
-                              placeholder="時間（分）｜Minutes"
-                              style={{
-                                ...inputStyle,
-                                marginBottom: '8px'
-                              }}
-                            />
-
-                            <div
-                              style={{
-                                display: 'flex',
-                                gap: '8px',
-                                flexWrap: 'wrap'
-                              }}
-                            >
-                              <button
-                                onClick={() => handleUpdateMinutes(log.id)}
-                                disabled={updatingLog}
-                                style={{
-                                  ...smallButtonStyle,
-                                  opacity: updatingLog ? 0.7 : 1,
-                                  cursor: updatingLog ? 'default' : 'pointer'
-                                }}
-                              >
-                                {updatingLog ? '保存中｜Saving' : '保存｜Save'}
-                              </button>
-
-                              <button
-                                onClick={handleCancelEdit}
-                                disabled={updatingLog}
-                                style={{
-                                  ...smallButtonStyle,
-                                  opacity: updatingLog ? 0.7 : 1,
-                                  cursor: updatingLog ? 'default' : 'pointer'
-                                }}
-                              >
-                                キャンセル｜Cancel
-                              </button>
+              {message && <p style={{ color: '#B8B8B8', marginBottom: '10px', fontSize: '12px' }}>{message}</p>}
+              {loading ? <p style={emptyText}>読み込み中｜Loading</p>
+                : logs.length === 0 ? <p style={emptyText}>ログがまだありません｜No logs yet</p>
+                : (
+                  <div>
+                    {logs.map((log) => {
+                      const isEditing = editingId === log.id
+                      const typeLabel = log.type === 'manual' ? '[MANUAL]' : log.type === 'edited' ? '[EDITED]' : '[REALTIME]'
+                      const previewMinutes = editingStartTime && editingEndTime ? calcMinutes(editingStartTime, editingEndTime) : null
+                      return (
+                        <div key={log.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '12px 0', fontSize: '13px', color: '#D8D8D8' }}>
+                          {isEditing ? (
+                            <div style={{ marginBottom: '8px' }}>
+                              <div style={{ fontSize: '11px', color: '#9A9A9A', marginBottom: '4px' }}>開始時刻｜Start time</div>
+                              <input type="datetime-local" value={editingStartTime} onChange={(e) => setEditingStartTime(e.target.value)} style={{ ...inputStyle, marginBottom: '10px' }} />
+                              <div style={{ fontSize: '11px', color: '#9A9A9A', marginBottom: '4px' }}>終了時刻｜End time</div>
+                              <input type="datetime-local" value={editingEndTime} onChange={(e) => setEditingEndTime(e.target.value)} style={{ ...inputStyle, marginBottom: '10px' }} />
+                              {previewMinutes !== null && <div style={{ fontSize: '11px', color: '#7A7A7A', marginBottom: '10px' }}>自動計算｜Auto: {previewMinutes}分</div>}
+                              <div style={{ fontSize: '11px', color: '#9A9A9A', marginBottom: '4px' }}>メモ｜Memo</div>
+                              <textarea value={editingMemo} onChange={(e) => setEditingMemo(e.target.value)} placeholder="メモ（任意）｜Memo (optional)" rows={2} style={{ ...textareaStyle, marginBottom: '10px' }} />
+                              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                <button onClick={() => handleUpdateLog(log.id)} disabled={updatingLog} style={{ ...smallButtonStyle, opacity: updatingLog ? 0.7 : 1, cursor: updatingLog ? 'default' : 'pointer' }}>
+                                  {updatingLog ? '保存中｜Saving' : '保存｜Save'}
+                                </button>
+                                <button onClick={handleCancelEdit} disabled={updatingLog} style={{ ...smallButtonStyle, opacity: updatingLog ? 0.7 : 1, cursor: updatingLog ? 'default' : 'pointer' }}>
+                                  キャンセル｜Cancel
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                        ) : (
-                          <div style={{ marginBottom: '4px' }}>
-                            {log.minutes ?? 0}分｜
-                            {new Date(
-                              log.start_time || log.created_at
-                            ).toLocaleDateString()}
-                          </div>
-                        )}
-
-                        <div
-                          style={{
-                            display: 'inline-block',
-                            fontSize: '11px',
-                            color: '#8F8F8F',
-                            marginBottom: log.memo ? '6px' : '8px',
-                            padding: '3px 7px',
-                            border: '1px solid rgba(255,255,255,0.08)',
-                            borderRadius: '999px',
-                            background: 'rgba(255,255,255,0.03)'
-                          }}
-                        >
-                          {typeLabel}
+                          ) : (
+                            <div style={{ marginBottom: '4px' }}>
+                              {log.minutes ?? 0}分｜{formatDate(log.start_time || log.created_at)} {formatTimeRange(log.start_time, log.end_time)}
+                            </div>
+                          )}
+                          {!isEditing && (
+                            <>
+                              <div style={{ display: 'inline-block', fontSize: '11px', color: '#8F8F8F', marginBottom: log.memo ? '6px' : '8px', padding: '3px 7px', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '999px', background: 'rgba(255,255,255,0.03)' }}>{typeLabel}</div>
+                              {log.memo && <div style={{ fontSize: '12px', color: '#B8B8B8', lineHeight: 1.5, marginBottom: '8px' }}>{log.memo}</div>}
+                              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                <button onClick={() => handleStartEdit(log)} style={smallButtonStyle}>編集｜Edit</button>
+                                <button onClick={() => handleDelete(log.id)} disabled={deletingId === log.id} style={{ ...smallButtonStyle, opacity: deletingId === log.id ? 0.7 : 1, cursor: deletingId === log.id ? 'default' : 'pointer' }}>
+                                  {deletingId === log.id ? '削除中｜Deleting' : '削除｜Delete'}
+                                </button>
+                              </div>
+                            </>
+                          )}
                         </div>
-
-                        {log.memo && (
-                          <div
-                            style={{
-                              fontSize: '12px',
-                              color: '#B8B8B8',
-                              lineHeight: 1.5,
-                              marginBottom: '8px'
-                            }}
-                          >
-                            {log.memo}
-                          </div>
-                        )}
-
-                        {!isEditing && (
-                          <div
-                            style={{
-                              display: 'flex',
-                              gap: '8px',
-                              flexWrap: 'wrap'
-                            }}
-                          >
-                            <button
-                              onClick={() => handleStartEdit(log)}
-                              style={smallButtonStyle}
-                            >
-                              編集｜Edit
-                            </button>
-
-                            <button
-                              onClick={() => handleDelete(log.id)}
-                              disabled={deletingId === log.id}
-                              style={{
-                                ...smallButtonStyle,
-                                opacity: deletingId === log.id ? 0.7 : 1,
-                                cursor: deletingId === log.id ? 'default' : 'pointer'
-                              }}
-                            >
-                              {deletingId === log.id ? '削除中｜Deleting' : '削除｜Delete'}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+                      )
+                    })}
+                  </div>
+                )}
             </section>
           </>
         )}
@@ -900,106 +555,36 @@ export default function Home() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div
-      style={{
-        border: '1px solid rgba(255,255,255,0.08)',
-        borderRadius: '10px',
-        padding: '12px 12px 11px',
-        background: 'rgba(17,17,17,0.68)',
-        backdropFilter: 'blur(6px)'
-      }}
-    >
-      <div
-        style={{
-          fontSize: '11px',
-          color: '#949494',
-          marginBottom: '5px',
-          lineHeight: 1.4
-        }}
-      >
-        {label}
-      </div>
-
-      <div
-        style={{
-          fontSize: '18px',
-          fontWeight: 600,
-          lineHeight: 1.2,
-          color: '#EAEAEA'
-        }}
-      >
-        {value}
-      </div>
+    <div style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '12px 12px 11px', background: 'rgba(17,17,17,0.68)', backdropFilter: 'blur(6px)' }}>
+      <div style={{ fontSize: '11px', color: '#949494', marginBottom: '5px', lineHeight: 1.4 }}>{label}</div>
+      <div style={{ fontSize: '18px', fontWeight: 600, lineHeight: 1.2, color: '#EAEAEA' }}>{value}</div>
     </div>
   )
 }
 
 const inputStyle: React.CSSProperties = {
-  width: '100%',
-  marginBottom: '10px',
-  padding: '10px 12px',
-  background: 'rgba(3,3,3,0.88)',
-  border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: '8px',
-  color: '#EAEAEA',
-  fontSize: '14px',
-  outline: 'none',
-  boxSizing: 'border-box'
+  width: '100%', marginBottom: '10px', padding: '10px 12px',
+  background: 'rgba(3,3,3,0.88)', border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: '8px', color: '#EAEAEA', fontSize: '14px', outline: 'none', boxSizing: 'border-box'
 }
-
 const textareaStyle: React.CSSProperties = {
-  width: '100%',
-  marginBottom: '10px',
-  padding: '10px 12px',
-  background: 'rgba(3,3,3,0.88)',
-  border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: '8px',
-  color: '#EAEAEA',
-  fontSize: '14px',
-  outline: 'none',
-  boxSizing: 'border-box',
-  resize: 'vertical'
+  width: '100%', marginBottom: '10px', padding: '10px 12px',
+  background: 'rgba(3,3,3,0.88)', border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: '8px', color: '#EAEAEA', fontSize: '14px', outline: 'none', boxSizing: 'border-box', resize: 'vertical'
 }
-
 const buttonStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '10px 12px',
-  background: 'rgba(8,8,8,0.9)',
-  border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: '8px',
-  color: '#EAEAEA',
-  cursor: 'pointer',
-  fontSize: '14px'
+  width: '100%', padding: '10px 12px', background: 'rgba(8,8,8,0.9)',
+  border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px',
+  color: '#EAEAEA', cursor: 'pointer', fontSize: '14px'
 }
-
 const smallButtonStyle: React.CSSProperties = {
-  width: 'auto',
-  padding: '7px 10px',
-  background: 'rgba(8,8,8,0.9)',
-  border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: '8px',
-  color: '#EAEAEA',
-  cursor: 'pointer',
-  fontSize: '12px'
+  width: 'auto', padding: '7px 10px', background: 'rgba(8,8,8,0.9)',
+  border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px',
+  color: '#EAEAEA', cursor: 'pointer', fontSize: '12px'
 }
-
 const glassBox: React.CSSProperties = {
-  border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: '10px',
-  padding: '14px',
-  background: 'rgba(17,17,17,0.68)',
-  backdropFilter: 'blur(6px)',
-  marginBottom: '18px'
+  border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '14px',
+  background: 'rgba(17,17,17,0.68)', backdropFilter: 'blur(6px)', marginBottom: '18px'
 }
-
-const sectionLabel: React.CSSProperties = {
-  fontSize: '12px',
-  color: '#949494',
-  marginBottom: '10px'
-}
-
-const emptyText: React.CSSProperties = {
-  fontSize: '13px',
-  color: '#B8B8B8',
-  margin: 0
-}
+const sectionLabel: React.CSSProperties = { fontSize: '12px', color: '#949494', marginBottom: '10px' }
+const emptyText: React.CSSProperties = { fontSize: '13px', color: '#B8B8B8', margin: 0 }
