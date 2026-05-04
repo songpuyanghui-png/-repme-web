@@ -86,6 +86,8 @@ export default function Home() {
   const [updatingLog, setUpdatingLog] = useState(false)
   const [deletingId, setDeletingId] = useState<number | null>(null)
 
+  const [showAllLogs, setShowAllLogs] = useState(false)
+
   const fetchLogs = useCallback(async () => {
     if (!isLoggedIn || !repmeCode) { setLogs([]); setLoading(false); return }
     setLoading(true)
@@ -149,15 +151,14 @@ export default function Home() {
   const fetchAllTasks = useCallback(async () => {
     if (!isLoggedIn || !repmeCode) { setAllTasks([]); return }
     const jstOffset = 9 * 60 * 60 * 1000
-const todayJST = new Date(Date.now() + jstOffset).toISOString().slice(0, 10)
-
-const { data, error } = await supabase
-  .from('schedule_tasks')
-  .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
-  .eq('repme_code', repmeCode)
-  .gte('task_date', todayJST)
-  .in('status', ['planned', 'in_progress'])
-  .order('scheduled_start_at', { ascending: true })
+    const todayJST = new Date(Date.now() + jstOffset).toISOString().slice(0, 10)
+    const { data, error } = await supabase
+      .from('schedule_tasks')
+      .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
+      .eq('repme_code', repmeCode)
+      .gte('task_date', todayJST)
+      .in('status', ['planned', 'in_progress'])
+      .order('scheduled_start_at', { ascending: true })
     if (error) { console.error(error); setAllTasks([]); return }
     setAllTasks(data || [])
   }, [isLoggedIn, repmeCode])
@@ -183,6 +184,7 @@ const { data, error } = await supabase
     setManualMinutes(''); setManualMemo(''); setSavingManualLog(false); setSelectedTaskId(null)
     setEditingId(null); setEditingStartTime(''); setEditingEndTime(''); setEditingMemo('')
     setUpdatingLog(false); setDeletingId(null)
+    setShowAllLogs(false)
   }
 
   const handleManualLogSubmit = async () => {
@@ -333,6 +335,8 @@ const { data, error } = await supabase
     const pct = Math.min(100, Math.round((logged / target) * 100))
     return { logged, target, pct }
   }
+
+  const visibleLogs = showAllLogs ? logs : logs.slice(0, 5)
 
   return (
     <main style={{ position: 'relative', minHeight: '100vh', overflow: 'hidden', background: '#030303', color: '#EAEAEA', fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif' }}>
@@ -505,7 +509,7 @@ const { data, error } = await supabase
                 : logs.length === 0 ? <p style={emptyText}>ログがまだありません｜No logs yet</p>
                 : (
                   <div>
-                    {logs.map((log) => {
+                    {visibleLogs.map((log) => {
                       const isEditing = editingId === log.id
                       const typeLabel = log.type === 'manual' ? '[MANUAL]' : log.type === 'edited' ? '[EDITED]' : '[REALTIME]'
                       const previewMinutes = editingStartTime && editingEndTime ? calcMinutes(editingStartTime, editingEndTime) : null
@@ -549,6 +553,14 @@ const { data, error } = await supabase
                         </div>
                       )
                     })}
+                    {logs.length > 5 && (
+                      <button
+                        onClick={() => setShowAllLogs(!showAllLogs)}
+                        style={{ ...smallButtonStyle, marginTop: '12px' }}
+                      >
+                        {showAllLogs ? '閉じる｜Show less' : `もっと見る｜Show all (${logs.length}件)`}
+                      </button>
+                    )}
                   </div>
                 )}
             </section>
