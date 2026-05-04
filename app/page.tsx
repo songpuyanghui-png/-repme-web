@@ -148,10 +148,16 @@ export default function Home() {
 
   const fetchAllTasks = useCallback(async () => {
     if (!isLoggedIn || !repmeCode) { setAllTasks([]); return }
-    const { data, error } = await supabase
-      .from('schedule_tasks')
-      .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
-      .eq('repme_code', repmeCode).order('scheduled_start_at', { ascending: false })
+    const jstOffset = 9 * 60 * 60 * 1000
+const todayJST = new Date(Date.now() + jstOffset).toISOString().slice(0, 10)
+
+const { data, error } = await supabase
+  .from('schedule_tasks')
+  .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
+  .eq('repme_code', repmeCode)
+  .gte('task_date', todayJST)
+  .in('status', ['planned', 'in_progress'])
+  .order('scheduled_start_at', { ascending: true })
     if (error) { console.error(error); setAllTasks([]); return }
     setAllTasks(data || [])
   }, [isLoggedIn, repmeCode])
