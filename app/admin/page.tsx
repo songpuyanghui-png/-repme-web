@@ -165,7 +165,7 @@ export default function AdminPage() {
 
   const visibleUsers = useMemo(() => users.filter(u => !u.is_private), [users])
   const visibleUserCodes = useMemo(() => new Set(visibleUsers.map(u => u.repme_code)), [visibleUsers])
-  const visibleLogs = useMemo(() => logs.filter(l => l.repme_code && visibleUserCodes.has(l.repme_code)), [logs, visibleUserCodes])
+  const visibleLogs = useMemo(() => logs, [logs])
 
   const totalMinutes = useMemo(() => visibleLogs.reduce((s, l) => s + (l.minutes || 0), 0), [visibleLogs])
   const totalLogs = visibleLogs.length
