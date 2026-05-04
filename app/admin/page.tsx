@@ -56,6 +56,13 @@ type UserActivity = {
   manualCount: number
 }
 
+type NoActivityUser = {
+  repme_code: string
+  display_name: string
+  lastLogAt: string | null
+  absentDays: number
+}
+
 export default function AdminPage() {
   const [isAuthed, setIsAuthed] = useState(false)
   const [checkingAuth, setCheckingAuth] = useState(true)
@@ -68,13 +75,11 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
 
-  // ユーザー詳細
   const [selectedUser, setSelectedUser] = useState<UserRow | null>(null)
   const [userTasks, setUserTasks] = useState<ScheduleTask[]>([])
   const [userLogsDetail, setUserLogsDetail] = useState<WorkLog[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
 
-  // タブ
   const [tab, setTab] = useState<'stats' | 'users'>('stats')
 
   const checkAuth = useCallback(async () => {
@@ -163,7 +168,7 @@ export default function AdminPage() {
     return map
   }, [users])
 
-  const visibleUsers = useMemo(() => users.filter(u => !u.is_private), [users])
+  const visibleUsers = useMemo(() => users, [users])
   const visibleUserCodes = useMemo(() => new Set(visibleUsers.map(u => u.repme_code)), [visibleUsers])
   const visibleLogs = useMemo(() => logs, [logs])
 
@@ -201,7 +206,8 @@ export default function AdminPage() {
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
     visibleLogs.slice().reverse().forEach(l => {
-      const d = new Date(l.start_time || l.created_at)
+      if (!l.start_time) return
+      const d = new Date(l.start_time + 'Z')
       const key = `${d.getMonth() + 1}/${d.getDate()}`
       grouped[key] = (grouped[key] || 0) + (l.minutes || 0)
     })
@@ -237,6 +243,52 @@ export default function AdminPage() {
     })).sort((a, b) => b.totalMinutes - a.totalMinutes)
   }, [visibleLogs])
 
+  const noActivityToday = useMemo<NoActivityUser[]>(() => {
+    const jstOffset = 9 * 60 * 60 * 1000
+    const nowJST = new Date(Date.now() + jstOffset)
+    const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
+
+    const activeToday = new Set(
+      logs
+        .filter(l => {
+          if (!l.start_time) return false
+          const jst = new Date(new Date(l.start_time).getTime() + jstOffset)
+          const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+          return dateStr === todayStr
+        })
+        .map(l => l.repme_code)
+        .filter(Boolean)
+    )
+
+    const lastLogMap: Record<string, string> = {}
+    logs.forEach(l => {
+      if (!l.repme_code || !l.start_time) return
+      if (!lastLogMap[l.repme_code] || l.start_time > lastLogMap[l.repme_code]) {
+        lastLogMap[l.repme_code] = l.start_time
+      }
+    })
+
+    return users
+      .filter(u => !activeToday.has(u.repme_code))
+      .map(u => {
+        const lastLog = lastLogMap[u.repme_code]
+        let absentDays = 0
+        if (lastLog) {
+          const lastJST = new Date(new Date(lastLog).getTime() + jstOffset)
+          const lastDateStr = `${lastJST.getUTCFullYear()}-${String(lastJST.getUTCMonth() + 1).padStart(2, '0')}-${String(lastJST.getUTCDate()).padStart(2, '0')}`
+          const diffMs = new Date(todayStr).getTime() - new Date(lastDateStr).getTime()
+          absentDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)))
+        }
+        return {
+          repme_code: u.repme_code,
+          display_name: u.display_name || u.repme_code,
+          lastLogAt: lastLog || null,
+          absentDays
+        }
+      })
+      .sort((a, b) => b.absentDays - a.absentDays)
+  }, [users, logs])
+
   const formatTime = (s: string | null | undefined) => {
     if (!s) return '-'
     return new Date(s + 'Z').toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' })
@@ -271,7 +323,6 @@ export default function AdminPage() {
     </main>
   )
 
-  // ユーザー詳細画面
   if (selectedUser) return (
     <main style={pageStyle}>
       <BackgroundLayer />
@@ -289,7 +340,6 @@ export default function AdminPage() {
 
         {detailLoading ? <p style={emptyText}>読み込み中...</p> : (
           <>
-            {/* schedule_tasks */}
             <section style={{ ...glassBox, marginBottom: '18px' }}>
               <div style={sectionLabel}>schedule_tasks｜{userTasks.length}件</div>
               {userTasks.length === 0 ? <p style={emptyText}>taskなし</p> : (
@@ -327,7 +377,6 @@ export default function AdminPage() {
               )}
             </section>
 
-            {/* work_logs全件 */}
             <section style={glassBox}>
               <div style={sectionLabel}>work_logs（全件）｜{userLogsDetail.length}件　合計: {userLogsDetail.reduce((s, l) => s + (l.minutes || 0), 0)}分</div>
               {userLogsDetail.length === 0 ? <p style={emptyText}>ログなし</p> : (
@@ -349,13 +398,11 @@ export default function AdminPage() {
     </main>
   )
 
-  // メイン画面
   return (
     <main style={pageStyle}>
       <BackgroundLayer />
       <div style={{ position: 'relative', zIndex: 1, width: '100%', maxWidth: '1200px', margin: '0 auto', padding: '28px 18px' }}>
 
-        {/* ヘッダー */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '12px', flexWrap: 'wrap', marginBottom: '24px' }}>
           <div>
             <h1 style={{ fontSize: '30px', fontWeight: 700, letterSpacing: '1.2px', margin: 0, marginBottom: '8px' }}>REPME | Admin Dashboard</h1>
@@ -367,7 +414,6 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* タブ */}
         <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
           {(['stats', 'users'] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
@@ -379,11 +425,10 @@ export default function AdminPage() {
 
         {message && <section style={{ ...glassBox, marginBottom: '18px' }}><p style={{ margin: 0, fontSize: '13px', color: '#B8B8B8' }}>{message}</p></section>}
 
-        {/* 全体統計タブ */}
         {tab === 'stats' && (
           <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px', marginBottom: '18px' }}>
-              <Stat label="表示対象ユーザー数｜Visible Users" value={`${totalUsers}`} />
+              <Stat label="総ユーザー数｜Total Users" value={`${totalUsers}`} />
               <Stat label="総ログ数｜Logs" value={`${totalLogs}`} />
               <Stat label="総作業時間｜Total Minutes" value={`${totalMinutes}分`} />
               <Stat label="今日の作業時間｜Today" value={`${todayMinutes}分`} />
@@ -392,6 +437,30 @@ export default function AdminPage() {
               <Stat label="平均作業時間/人｜Avg" value={`${averageMinutesPerUser}分`} />
               <Stat label="manual / realtime" value={`${manualRatio}% / ${realtimeRatio}%`} />
             </div>
+
+            {/* 本日未作業 */}
+            <section style={{ ...glassBox, marginBottom: '18px' }}>
+              <div style={sectionLabel}>本日未作業｜No Activity Today　{noActivityToday.length}人</div>
+              {loading ? <p style={emptyText}>読み込み中...</p>
+                : noActivityToday.length === 0 ? <p style={emptyText}>全員作業済み</p>
+                : (
+                  <div style={{ display: 'grid', gap: '8px' }}>
+                    {noActivityToday.map(u => (
+                      <div key={u.repme_code} style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '12px', background: 'rgba(3,3,3,0.45)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                        <div>
+                          <div style={{ fontSize: '14px', fontWeight: 600, color: '#EAEAEA' }}>{u.display_name}</div>
+                          <div style={{ fontSize: '12px', color: '#B8B8B8', marginTop: '2px' }}>
+                            最終作業：{u.lastLogAt ? formatDate(u.lastLogAt) : '記録なし'}
+                          </div>
+                        </div>
+                        <div style={{ fontSize: '13px', fontWeight: 600, color: u.absentDays >= 3 ? '#C07A7A' : '#C0A07A' }}>
+                          {u.absentDays === 0 ? '本日未作業' : `${u.absentDays}日連続欠席`}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+            </section>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '18px', marginBottom: '18px' }}>
               <section style={glassBox}>
@@ -454,10 +523,9 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* ユーザー一覧タブ */}
         {tab === 'users' && (
           <section style={glassBox}>
-            <div style={sectionLabel}>ユーザー一覧｜{users.length}人（非表示含む）</div>
+            <div style={sectionLabel}>ユーザー一覧｜{users.length}人</div>
             {users.length === 0 ? <p style={emptyText}>ユーザーなし</p> : (
               <div>
                 {users.map(user => (
