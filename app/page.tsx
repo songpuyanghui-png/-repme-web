@@ -288,7 +288,8 @@ export default function Home() {
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
     logs.slice().reverse().forEach((log) => {
-      const date = new Date((log.start_time || log.created_at) + 'Z')
+  if (!log.start_time) return
+  const date = new Date(log.start_time + 'Z')
       const key = `${date.getMonth() + 1}/${date.getDate()}`
       grouped[key] = (grouped[key] || 0) + (log.minutes || 0)
     })
