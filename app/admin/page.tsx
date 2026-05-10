@@ -252,7 +252,7 @@ export default function AdminPage() {
       logs
         .filter(l => {
           if (!l.start_time) return false
-          const jst = new Date(new Date(l.start_time).getTime() + jstOffset)
+          const jst = new Date(new Date(l.start_time + 'Z').getTime() + jstOffset)
           const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
           return dateStr === todayStr
         })
