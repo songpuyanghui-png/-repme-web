@@ -53,7 +53,8 @@ const toLocalInputValue = (utcStr: string): string => {
 }
 
 const toUTC = (localStr: string): string => {
-  const jst = new Date(localStr + ':00+09:00')
+  const normalized = localStr.replace(/\//g, '-').replace(' ', 'T')
+  const jst = new Date(normalized + ':00+09:00')
   return new Date(jst.getTime() - 9 * 60 * 60 * 1000).toISOString()
 }
 
