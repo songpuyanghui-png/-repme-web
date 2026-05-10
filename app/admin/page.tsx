@@ -252,7 +252,7 @@ export default function AdminPage() {
       logs
         .filter(l => {
           if (!l.start_time) return false
-          const jst = new Date(new Date(l.start_time + 'Z').getTime() + jstOffset)
+          const jst = new Date(new Date(l.start_time).getTime() + jstOffset)
           const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
           return dateStr === todayStr
         })
@@ -274,7 +274,7 @@ export default function AdminPage() {
         const lastLog = lastLogMap[u.repme_code]
         let absentDays = 0
         if (lastLog) {
-          const lastJST = new Date(new Date(lastLog).getTime() + jstOffset)
+          const lastJST = new Date(new Date(lastLog + 'Z').getTime() + jstOffset)
           const lastDateStr = `${lastJST.getUTCFullYear()}-${String(lastJST.getUTCMonth() + 1).padStart(2, '0')}-${String(lastJST.getUTCDate()).padStart(2, '0')}`
           const diffMs = new Date(todayStr).getTime() - new Date(lastDateStr).getTime()
           absentDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)))
