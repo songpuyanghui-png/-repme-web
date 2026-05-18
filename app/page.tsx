@@ -46,7 +46,7 @@ type ScheduleTask = {
 }
 
 const toLocalInputValue = (utcStr: string): string => {
-  const d = new Date(utcStr)
+  const d = parseUTCString(utcStr)
   const jstOffset = 9 * 60 * 60 * 1000
   const local = new Date(d.getTime() + jstOffset)
   return local.toISOString().slice(0, 16)
@@ -63,13 +63,18 @@ const calcMinutes = (startLocal: string, endLocal: string): number => {
 }
 
 // UTC文字列を安全にDateオブジェクトに変換
-// 'T'あり（ISO形式）→ そのままparse
-// スペース区切り → 'T'に置換して'Z'を付与
-const parseUTCString = (timeStr: string): Date => {
-  const normalized = timeStr.includes('T')
-    ? timeStr
-    : timeStr.replace(' ', 'T') + 'Z'
-  return new Date(normalized)
+// - オフセット付き（+00:00 / +08:00 / Z）→ そのままnew Date()（正しく処理される）
+// - スペース区切りでオフセットなし → UTCとして'T'+'Z'を付与
+function parseUTCString(timeStr: string): Date {
+  if (
+    timeStr.includes('+') ||
+    timeStr.endsWith('Z') ||
+    timeStr.includes('T')
+  ) {
+    return new Date(timeStr)
+  }
+  // スペース区切り・オフセットなし → UTC扱い
+  return new Date(timeStr.replace(' ', 'T') + 'Z')
 }
 
 export default function Home() {
@@ -114,19 +119,18 @@ export default function Home() {
     if (!isLoggedIn || !repmeCode) { setTodayTasks([]); setTasksLoading(false); return }
     setTasksLoading(true)
     try {
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
-      const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999)
-      const todayStartUTC = new Date(todayStart.getTime() - todayStart.getTimezoneOffset() * 60000)
-      const todayEndUTC = new Date(todayEnd.getTime() - todayEnd.getTimezoneOffset() * 60000)
-      const nowJST = new Date(Date.now() + 9 * 60 * 60 * 1000)
+      const jstOffset = 9 * 60 * 60 * 1000
+      const nowJST = new Date(Date.now() + jstOffset)
       const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
+      const todayStartUTC = new Date(todayStr + 'T00:00:00+09:00').toISOString()
+      const todayEndUTC = new Date(todayStr + 'T23:59:59+09:00').toISOString()
 
       const { data: scheduleTasks, error: scheduleError } = await supabase
         .from('schedule_tasks')
         .select('id, title, source_type, plan_type, start_time, end_time, scheduled_start_at, status, repme_code, target_minutes')
         .eq('repme_code', repmeCode).eq('plan_type', 'schedule')
-        .gte('scheduled_start_at', todayStartUTC.toISOString())
-        .lte('scheduled_start_at', todayEndUTC.toISOString())
+        .gte('scheduled_start_at', todayStartUTC)
+        .lte('scheduled_start_at', todayEndUTC)
         .order('scheduled_start_at', { ascending: true })
       if (scheduleError) console.error(scheduleError)
 
@@ -269,8 +273,7 @@ export default function Home() {
     const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
       if (!log.start_time) return sum
-      const d = parseUTCString(log.start_time)
-      const jst = new Date(d.getTime() + jstOffset)
+      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
       const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
       return dateStr === todayStr ? sum + (log.minutes || 0) : sum
     }, 0)
@@ -285,8 +288,7 @@ export default function Home() {
     const weekStartStr = `${weekStartJST.getUTCFullYear()}-${String(weekStartJST.getUTCMonth() + 1).padStart(2, '0')}-${String(weekStartJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
       if (!log.start_time) return sum
-      const d = parseUTCString(log.start_time)
-      const jst = new Date(d.getTime() + jstOffset)
+      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
       const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
       return dateStr >= weekStartStr ? sum + (log.minutes || 0) : sum
     }, 0)
