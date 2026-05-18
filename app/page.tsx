@@ -170,15 +170,28 @@ export default function Home() {
   const fetchAllTasks = useCallback(async () => {
     if (!isLoggedIn || !repmeCode) { setAllTasks([]); return }
     const todayJST = new Date(Date.now() + jstOffset).toISOString().slice(0, 10)
-    const { data, error } = await supabase
+
+    // Start Plan: 当日分をstatusに関わらず取得（completedでも表示する）
+    const { data: startData, error: startError } = await supabase
       .from('schedule_tasks')
       .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
       .eq('repme_code', repmeCode)
+      .eq('plan_type', 'start')
+      .eq('task_date', todayJST)
+    if (startError) console.error(startError)
+
+    // Schedule Plan: 当日以降でplanned/in_progressのみ
+    const { data: scheduleData, error: scheduleError } = await supabase
+      .from('schedule_tasks')
+      .select('id, title, plan_type, source_type, scheduled_start_at, end_time, start_time, status, repme_code, target_minutes')
+      .eq('repme_code', repmeCode)
+      .eq('plan_type', 'schedule')
       .gte('task_date', todayJST)
       .in('status', ['planned', 'in_progress'])
       .order('scheduled_start_at', { ascending: true })
-    if (error) { console.error(error); setAllTasks([]); return }
-    setAllTasks(data || [])
+    if (scheduleError) console.error(scheduleError)
+
+    setAllTasks([...(startData || []), ...(scheduleData || [])])
   }, [isLoggedIn, repmeCode])
 
   // Start Plan履歴取得（達成連続日数の計算に使用）
@@ -375,6 +388,31 @@ export default function Home() {
     return count
   }, [startTaskHistory, logs])
 
+  // 累計目標達成日数（Start Planがある日のうち達成した日の総数）
+  const achievementTotal = useMemo(() => {
+    if (startTaskHistory.length === 0 || logs.length === 0) return 0
+
+    const dailyMinutesMap: Record<string, number> = {}
+    logs.forEach(log => {
+      if (!log.start_time) return
+      const dateStr = getJSTDateStr(parseUTCString(log.start_time))
+      dailyMinutesMap[dateStr] = (dailyMinutesMap[dateStr] || 0) + (log.minutes || 0)
+    })
+
+    const todayStr = getJSTDateStr(new Date())
+    return startTaskHistory.filter(t => {
+      if (t.task_date > todayStr) return false
+      const logged = dailyMinutesMap[t.task_date] || 0
+      return logged >= t.target_minutes
+    }).length
+  }, [startTaskHistory, logs])
+
+  // Start Planが設定されている日の総数（累計の分母）
+  const startPlanTotal = useMemo(() => {
+    const todayStr = getJSTDateStr(new Date())
+    return startTaskHistory.filter(t => t.task_date <= todayStr).length
+  }, [startTaskHistory])
+
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
     logs.slice().reverse().forEach((log) => {
@@ -517,13 +555,16 @@ export default function Home() {
                 )}
             </section>
 
-            {/* Stats - 達成連続日数を追加 */}
+            {/* Stats */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '18px' }}>
               <Stat label="合計時間｜Total" value={`${totalMinutes}分`} />
               <Stat label="今日｜Today" value={`${todayMinutes}分`} />
               <Stat label="今週｜This Week" value={`${weekMinutes}分`} />
               <Stat label="連続日数｜Streak" value={`${streak}日`} />
-              <Stat label="達成連続日数｜Achievement Streak" value={`${achievementStreak}日`} />
+              <Stat
+                label="目標達成連続日数｜Achievement Streak"
+                value={startPlanTotal > 0 ? `${achievementStreak}日 / ${achievementTotal}日達成 (${startPlanTotal}日中)` : '-'}
+              />
             </div>
 
             <section style={glassBox}>
