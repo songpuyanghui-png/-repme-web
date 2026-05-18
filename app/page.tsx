@@ -46,7 +46,7 @@ type ScheduleTask = {
 }
 
 const toLocalInputValue = (utcStr: string): string => {
-  const d = new Date(utcStr + 'Z')
+  const d = new Date(utcStr)
   const jstOffset = 9 * 60 * 60 * 1000
   const local = new Date(d.getTime() + jstOffset)
   return local.toISOString().slice(0, 16)
@@ -254,56 +254,79 @@ export default function Home() {
   const totalMinutes = useMemo(() => logs.reduce((sum, log) => sum + (log.minutes || 0), 0), [logs])
 
   const todayMinutes = useMemo(() => {
-    const today = new Date(); today.setHours(0, 0, 0, 0)
+    const jstOffset = 9 * 60 * 60 * 1000
+    const nowJST = new Date(Date.now() + jstOffset)
+    const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
-      const d = new Date((log.start_time || log.created_at) + 'Z'); d.setHours(0, 0, 0, 0)
-      return d.getTime() === today.getTime() ? sum + (log.minutes || 0) : sum
+      if (!log.start_time) return sum
+      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+      return dateStr === todayStr ? sum + (log.minutes || 0) : sum
     }, 0)
   }, [logs])
 
   const weekMinutes = useMemo(() => {
-    const today = new Date(); const day = today.getDay()
+    const jstOffset = 9 * 60 * 60 * 1000
+    const nowJST = new Date(Date.now() + jstOffset)
+    const day = nowJST.getUTCDay()
     const diffFromMonday = day === 0 ? 6 : day - 1
-    const weekStart = new Date(today); weekStart.setDate(today.getDate() - diffFromMonday); weekStart.setHours(0, 0, 0, 0)
+    const weekStartJST = new Date(nowJST.getTime() - diffFromMonday * 24 * 60 * 60 * 1000)
+    const weekStartStr = `${weekStartJST.getUTCFullYear()}-${String(weekStartJST.getUTCMonth() + 1).padStart(2, '0')}-${String(weekStartJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
-      const d = new Date((log.start_time || log.created_at) + 'Z')
-      return d >= weekStart ? sum + (log.minutes || 0) : sum
+      if (!log.start_time) return sum
+      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+      return dateStr >= weekStartStr ? sum + (log.minutes || 0) : sum
     }, 0)
   }, [logs])
 
   const streak = useMemo(() => {
     if (logs.length === 0) return 0
+    const jstOffset = 9 * 60 * 60 * 1000
     const dateSet = new Set(logs.map((log) => {
-      const d = new Date((log.start_time || log.created_at) + 'Z'); d.setHours(0, 0, 0, 0); return d.getTime()
-    }))
-    const today = new Date(); today.setHours(0, 0, 0, 0)
-    const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1)
-    const hasToday = dateSet.has(today.getTime()); const hasYesterday = dateSet.has(yesterday.getTime())
-    if (!hasToday && !hasYesterday) return 0
-    let count = 0; const current = new Date(hasToday ? today : yesterday)
-    while (dateSet.has(current.getTime())) { count++; current.setDate(current.getDate() - 1) }
+      if (!log.start_time) return ''
+      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      return `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+    }).filter(Boolean))
+    const nowJST = new Date(Date.now() + jstOffset)
+    let checkDate = new Date(Date.UTC(nowJST.getUTCFullYear(), nowJST.getUTCMonth(), nowJST.getUTCDate()))
+    let count = 0
+    while (true) {
+      const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
+      if (!dateSet.has(dateStr)) break
+      count++
+      checkDate = new Date(checkDate.getTime() - 24 * 60 * 60 * 1000)
+    }
     return count
   }, [logs])
 
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
+    const jstOffset = 9 * 60 * 60 * 1000
     logs.slice().reverse().forEach((log) => {
-  if (!log.start_time) return
-  const date = new Date(log.start_time + 'Z')
-      const key = `${date.getMonth() + 1}/${date.getDate()}`
+      if (!log.start_time) return
+      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const key = `${jst.getUTCMonth() + 1}/${jst.getUTCDate()}`
       grouped[key] = (grouped[key] || 0) + (log.minutes || 0)
     })
     return Object.entries(grouped).map(([date, minutes]) => ({ date, minutes }))
   }, [logs])
 
+  // タイムゾーン安全なformatTime（'Z'を付けない）
   const formatTime = (timeStr: string | null | undefined) => {
     if (!timeStr) return '-'
-    return new Date(timeStr + 'Z').toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' })
+    const d = new Date(timeStr)
+    if (isNaN(d.getTime())) return '-'
+    const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    return `${String(jst.getUTCHours()).padStart(2, '0')}:${String(jst.getUTCMinutes()).padStart(2, '0')}`
   }
 
   const formatDate = (timeStr: string | null | undefined) => {
     if (!timeStr) return '-'
-    return new Date(timeStr + 'Z').toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit', timeZone: 'Asia/Tokyo' })
+    const d = new Date(timeStr)
+    if (isNaN(d.getTime())) return '-'
+    const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()}`
   }
 
   const formatTimeRange = (start: string | null | undefined, end: string | null | undefined) => {
