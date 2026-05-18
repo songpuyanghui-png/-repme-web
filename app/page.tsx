@@ -45,13 +45,6 @@ type ScheduleTask = {
   logs?: WorkLog[]
 }
 
-const toLocalInputValue = (utcStr: string): string => {
-  const d = parseUTCString(utcStr)
-  const jstOffset = 9 * 60 * 60 * 1000
-  const local = new Date(d.getTime() + jstOffset)
-  return local.toISOString().slice(0, 16)
-}
-
 const toUTC = (localStr: string): string => {
   const normalized = localStr.replace(/\//g, '-').replace(' ', 'T')
   return new Date(normalized + ':00+09:00').toISOString()
@@ -63,18 +56,25 @@ const calcMinutes = (startLocal: string, endLocal: string): number => {
 }
 
 // UTC文字列を安全にDateオブジェクトに変換
-// - オフセット付き（+00:00 / +08:00 / Z）→ そのままnew Date()（正しく処理される）
-// - スペース区切りでオフセットなし → UTCとして'T'+'Z'を付与
+// - Zで終わる → UTC確定
+// - +/-オフセット付き（+00:00等）→ そのままparse
+// - Tあり・オフセットなし（2026-05-18T11:00:00）→ ブラウザがローカルタイム解釈するのでZを付与してUTC扱いに
+// - スペース区切り（2026-05-18 11:00:00）→ TとZを付与してUTC扱いに
 function parseUTCString(timeStr: string): Date {
-  if (
-    timeStr.includes('+') ||
-    timeStr.endsWith('Z') ||
-    timeStr.includes('T')
-  ) {
+  if (timeStr.endsWith('Z')) return new Date(timeStr)
+  // +HH:MM 形式のオフセットが含まれる（10文字目以降に+か-がある）
+  if (timeStr.length > 10 && (timeStr.slice(10).includes('+') || timeStr.slice(10).includes('-'))) {
     return new Date(timeStr)
   }
-  // スペース区切り・オフセットなし → UTC扱い
+  // それ以外（オフセットなし）→ UTCとして扱う
   return new Date(timeStr.replace(' ', 'T') + 'Z')
+}
+
+const toLocalInputValue = (utcStr: string): string => {
+  const d = parseUTCString(utcStr)
+  const jstOffset = 9 * 60 * 60 * 1000
+  const local = new Date(d.getTime() + jstOffset)
+  return local.toISOString().slice(0, 16)
 }
 
 export default function Home() {
@@ -265,10 +265,11 @@ export default function Home() {
     finally { setDeletingId(null) }
   }
 
+  const jstOffset = 9 * 60 * 60 * 1000
+
   const totalMinutes = useMemo(() => logs.reduce((sum, log) => sum + (log.minutes || 0), 0), [logs])
 
   const todayMinutes = useMemo(() => {
-    const jstOffset = 9 * 60 * 60 * 1000
     const nowJST = new Date(Date.now() + jstOffset)
     const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
@@ -280,7 +281,6 @@ export default function Home() {
   }, [logs])
 
   const weekMinutes = useMemo(() => {
-    const jstOffset = 9 * 60 * 60 * 1000
     const nowJST = new Date(Date.now() + jstOffset)
     const day = nowJST.getUTCDay()
     const diffFromMonday = day === 0 ? 6 : day - 1
@@ -296,7 +296,6 @@ export default function Home() {
 
   const streak = useMemo(() => {
     if (logs.length === 0) return 0
-    const jstOffset = 9 * 60 * 60 * 1000
     const dateSet = new Set(logs.map((log) => {
       if (!log.start_time) return ''
       const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
@@ -316,7 +315,6 @@ export default function Home() {
 
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
-    const jstOffset = 9 * 60 * 60 * 1000
     logs.slice().reverse().forEach((log) => {
       if (!log.start_time) return
       const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
@@ -330,7 +328,7 @@ export default function Home() {
     if (!timeStr) return '-'
     const d = parseUTCString(timeStr)
     if (isNaN(d.getTime())) return '-'
-    const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    const jst = new Date(d.getTime() + jstOffset)
     return `${String(jst.getUTCHours()).padStart(2, '0')}:${String(jst.getUTCMinutes()).padStart(2, '0')}`
   }
 
@@ -338,7 +336,7 @@ export default function Home() {
     if (!timeStr) return '-'
     const d = parseUTCString(timeStr)
     if (isNaN(d.getTime())) return '-'
-    const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    const jst = new Date(d.getTime() + jstOffset)
     return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()}`
   }
 
@@ -398,7 +396,6 @@ export default function Home() {
               <button onClick={handleLogout} style={{ padding: '8px 12px', background: 'rgba(17,17,17,0.72)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', color: '#EAEAEA', cursor: 'pointer', fontSize: '12px', backdropFilter: 'blur(6px)' }}>ログアウト｜Logout</button>
             </div>
 
-            {/* 今日のtask */}
             <section style={glassBox}>
               <div style={sectionLabel}>今日のtask｜Today&apos;s Tasks</div>
               {tasksLoading ? <p style={emptyText}>読み込み中｜Loading</p>
@@ -422,7 +419,6 @@ export default function Home() {
                               </>
                             )}
                           </div>
-
                           {achievement && (
                             <div style={{ marginBottom: '10px' }}>
                               <div style={{ fontSize: '12px', color: '#B8B8B8', marginBottom: '6px' }}>
@@ -436,11 +432,9 @@ export default function Home() {
                               </div>
                             </div>
                           )}
-
                           <div style={{ display: 'inline-block', fontSize: '11px', color: statusColor(task.status), padding: '3px 7px', border: `1px solid ${statusColor(task.status)}`, borderRadius: '999px', background: 'rgba(255,255,255,0.03)', marginBottom: task.logs && task.logs.length > 0 ? '12px' : '0' }}>
                             {task.status || 'planned'}
                           </div>
-
                           {task.logs && task.logs.length > 0 && (
                             <div style={{ borderLeft: '2px solid rgba(255,255,255,0.1)', paddingLeft: '12px', marginTop: '8px' }}>
                               {task.logs.map((log) => (
@@ -461,7 +455,6 @@ export default function Home() {
                 )}
             </section>
 
-            {/* stats */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '18px' }}>
               <Stat label="合計時間｜Total" value={`${totalMinutes}分`} />
               <Stat label="今日｜Today" value={`${todayMinutes}分`} />
@@ -469,7 +462,6 @@ export default function Home() {
               <Stat label="連続日数｜Streak" value={`${streak}日`} />
             </div>
 
-            {/* plan確認 */}
             <section style={glassBox}>
               <div style={sectionLabel}>plan確認｜Plans</div>
               {allTasks.length === 0 ? <p style={emptyText}>planはまだありません｜No plans yet</p> : (
@@ -498,7 +490,6 @@ export default function Home() {
               )}
             </section>
 
-            {/* 手動記録 */}
             <section style={glassBox}>
               <div style={sectionLabel}>手動記録｜Manual Log</div>
               <div style={{ display: 'grid', gap: '10px' }}>
@@ -518,7 +509,6 @@ export default function Home() {
               </div>
             </section>
 
-            {/* グラフ */}
             <section style={glassBox}>
               <div style={sectionLabel}>日別作業｜Daily Work</div>
               {loading ? <p style={emptyText}>読み込み中｜Loading</p>
@@ -538,7 +528,6 @@ export default function Home() {
                 )}
             </section>
 
-            {/* 作業ログ */}
             <section style={glassBox}>
               <div style={sectionLabel}>作業ログ｜Work Logs</div>
               {message && <p style={{ color: '#B8B8B8', marginBottom: '10px', fontSize: '12px' }}>{message}</p>}
@@ -591,10 +580,7 @@ export default function Home() {
                       )
                     })}
                     {logs.length > 5 && (
-                      <button
-                        onClick={() => setShowAllLogs(!showAllLogs)}
-                        style={{ ...smallButtonStyle, marginTop: '12px' }}
-                      >
+                      <button onClick={() => setShowAllLogs(!showAllLogs)} style={{ ...smallButtonStyle, marginTop: '12px' }}>
                         {showAllLogs ? '閉じる｜Show less' : `もっと見る｜Show all (${logs.length}件)`}
                       </button>
                     )}
