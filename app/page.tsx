@@ -62,6 +62,16 @@ const calcMinutes = (startLocal: string, endLocal: string): number => {
   return Math.max(0, Math.floor(diff / 60000))
 }
 
+// UTC文字列を安全にDateオブジェクトに変換
+// 'T'あり（ISO形式）→ そのままparse
+// スペース区切り → 'T'に置換して'Z'を付与
+const parseUTCString = (timeStr: string): Date => {
+  const normalized = timeStr.includes('T')
+    ? timeStr
+    : timeStr.replace(' ', 'T') + 'Z'
+  return new Date(normalized)
+}
+
 export default function Home() {
   const [logs, setLogs] = useState<WorkLog[]>([])
   const [todayTasks, setTodayTasks] = useState<ScheduleTask[]>([])
@@ -259,7 +269,8 @@ export default function Home() {
     const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
       if (!log.start_time) return sum
-      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const d = parseUTCString(log.start_time)
+      const jst = new Date(d.getTime() + jstOffset)
       const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
       return dateStr === todayStr ? sum + (log.minutes || 0) : sum
     }, 0)
@@ -274,7 +285,8 @@ export default function Home() {
     const weekStartStr = `${weekStartJST.getUTCFullYear()}-${String(weekStartJST.getUTCMonth() + 1).padStart(2, '0')}-${String(weekStartJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
       if (!log.start_time) return sum
-      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const d = parseUTCString(log.start_time)
+      const jst = new Date(d.getTime() + jstOffset)
       const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
       return dateStr >= weekStartStr ? sum + (log.minutes || 0) : sum
     }, 0)
@@ -285,7 +297,7 @@ export default function Home() {
     const jstOffset = 9 * 60 * 60 * 1000
     const dateSet = new Set(logs.map((log) => {
       if (!log.start_time) return ''
-      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
       return `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
     }).filter(Boolean))
     const nowJST = new Date(Date.now() + jstOffset)
@@ -305,17 +317,16 @@ export default function Home() {
     const jstOffset = 9 * 60 * 60 * 1000
     logs.slice().reverse().forEach((log) => {
       if (!log.start_time) return
-      const jst = new Date(new Date(log.start_time).getTime() + jstOffset)
+      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
       const key = `${jst.getUTCMonth() + 1}/${jst.getUTCDate()}`
       grouped[key] = (grouped[key] || 0) + (log.minutes || 0)
     })
     return Object.entries(grouped).map(([date, minutes]) => ({ date, minutes }))
   }, [logs])
 
-  // タイムゾーン安全なformatTime（'Z'を付けない）
   const formatTime = (timeStr: string | null | undefined) => {
     if (!timeStr) return '-'
-    const d = new Date(timeStr)
+    const d = parseUTCString(timeStr)
     if (isNaN(d.getTime())) return '-'
     const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
     return `${String(jst.getUTCHours()).padStart(2, '0')}:${String(jst.getUTCMinutes()).padStart(2, '0')}`
@@ -323,7 +334,7 @@ export default function Home() {
 
   const formatDate = (timeStr: string | null | undefined) => {
     if (!timeStr) return '-'
-    const d = new Date(timeStr)
+    const d = parseUTCString(timeStr)
     if (isNaN(d.getTime())) return '-'
     const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
     return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()}`
