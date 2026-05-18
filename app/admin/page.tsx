@@ -61,6 +61,13 @@ type NoActivityUser = {
   display_name: string
   lastLogAt: string | null
   absentDays: number
+  reportType: 'absent' | 'no_schedule' | null
+}
+
+type AbsenceReport = {
+  repme_code: string
+  report_date: string
+  report_type: 'absent' | 'no_schedule'
 }
 
 export default function AdminPage() {
@@ -72,6 +79,7 @@ export default function AdminPage() {
 
   const [logs, setLogs] = useState<WorkLog[]>([])
   const [users, setUsers] = useState<UserRow[]>([])
+  const [absenceReports, setAbsenceReports] = useState<AbsenceReport[]>([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
 
@@ -119,14 +127,29 @@ export default function AdminPage() {
     if (!isAuthed) return
     try {
       setLoading(true); setMessage('')
-      const [{ data: logsData, error: logsError }, { data: usersData, error: usersError }] = await Promise.all([
+
+      // 今日のJST日付
+      const jstOffset = 9 * 60 * 60 * 1000
+      const nowJST = new Date(Date.now() + jstOffset)
+      const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
+
+      const [
+        { data: logsData, error: logsError },
+        { data: usersData, error: usersError },
+        { data: absenceData, error: absenceError }
+      ] = await Promise.all([
         supabase.from('work_logs').select('*').order('created_at', { ascending: false }),
-        supabase.from('users').select('*')
+        supabase.from('users').select('*'),
+        supabase.from('absence_reports').select('repme_code, report_date, report_type').eq('report_date', todayStr)
       ])
+
       if (logsError) { console.error(logsError); setMessage('ログ取得失敗'); setLogs([]) }
       else setLogs(logsData || [])
       if (usersError) { console.error(usersError); setUsers([]) }
       else setUsers(usersData || [])
+      if (absenceError) { console.error(absenceError); setAbsenceReports([]) }
+      else setAbsenceReports(absenceData || [])
+
     } catch { setMessage('エラーが発生しました') }
     finally { setLoading(false) }
   }, [isAuthed])
@@ -169,7 +192,6 @@ export default function AdminPage() {
   }, [users])
 
   const visibleUsers = useMemo(() => users, [users])
-  const visibleUserCodes = useMemo(() => new Set(visibleUsers.map(u => u.repme_code)), [visibleUsers])
   const visibleLogs = useMemo(() => logs, [logs])
 
   const totalMinutes = useMemo(() => visibleLogs.reduce((s, l) => s + (l.minutes || 0), 0), [visibleLogs])
@@ -243,6 +265,13 @@ export default function AdminPage() {
     })).sort((a, b) => b.totalMinutes - a.totalMinutes)
   }, [visibleLogs])
 
+  // 当日の欠席届マップ（repme_code → report_type）
+  const todayAbsenceMap = useMemo(() => {
+    const map: Record<string, 'absent' | 'no_schedule'> = {}
+    absenceReports.forEach(r => { map[r.repme_code] = r.report_type })
+    return map
+  }, [absenceReports])
+
   const noActivityToday = useMemo<NoActivityUser[]>(() => {
     const jstOffset = 9 * 60 * 60 * 1000
     const nowJST = new Date(Date.now() + jstOffset)
@@ -252,7 +281,7 @@ export default function AdminPage() {
       logs
         .filter(l => {
           if (!l.start_time) return false
-          const jst = new Date(new Date(l.start_time + 'Z').getTime() + jstOffset)
+          const jst = new Date(new Date(l.start_time).getTime() + jstOffset)
           const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
           return dateStr === todayStr
         })
@@ -274,20 +303,22 @@ export default function AdminPage() {
         const lastLog = lastLogMap[u.repme_code]
         let absentDays = 0
         if (lastLog) {
-          const lastJST = new Date(new Date(lastLog + 'Z').getTime() + jstOffset)
-          const lastDateStr = `${lastJST.getUTCFullYear()}-${String(lastJST.getUTCMonth() + 1).padStart(2, '0')}-${String(lastJST.getUTCDate()).padStart(2, '0')}`
+          const jst = new Date(new Date(lastLog).getTime() + jstOffset)
+          const lastDateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
           const diffMs = new Date(todayStr).getTime() - new Date(lastDateStr).getTime()
-          absentDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)))
+          // 日数差 - 1（昨日作業→今日休み = 0日連続欠席 = 本日未作業）
+          absentDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)) - 1)
         }
         return {
           repme_code: u.repme_code,
           display_name: u.display_name || u.repme_code,
           lastLogAt: lastLog || null,
-          absentDays
+          absentDays,
+          reportType: todayAbsenceMap[u.repme_code] || null
         }
       })
       .sort((a, b) => b.absentDays - a.absentDays)
-  }, [users, logs])
+  }, [users, logs, todayAbsenceMap])
 
   const formatTime = (s: string | null | undefined) => {
     if (!s) return '-'
@@ -303,6 +334,31 @@ export default function AdminPage() {
       case 'completed': return '#7A9EC0'; case 'late': return '#C0A07A'
       case 'missed': return '#C07A7A'; default: return '#6A6A6A'
     }
+  }
+
+  // 欠席ステータス表示
+  const renderAbsentStatus = (u: NoActivityUser) => {
+    const leftLabel = u.absentDays === 0 ? '本日未作業' : `${u.absentDays}日連続欠席`
+    const leftColor = u.absentDays >= 2 ? '#C07A7A' : '#C0A07A'
+
+    let rightLabel = ''
+    let rightColor = ''
+
+    if (u.reportType === 'absent') {
+      rightLabel = '欠席届提出済み ✅'
+      rightColor = '#A8C5A0'
+    } else if (u.reportType === 'no_schedule') {
+      rightLabel = '予定提出無し届済み 📋'
+      rightColor = '#7A9EC0'
+    } else if (u.absentDays >= 1) {
+      rightLabel = '無断欠席 ⚠️'
+      rightColor = '#C07A7A'
+    } else {
+      rightLabel = '未提出'
+      rightColor = '#6A6A6A'
+    }
+
+    return { leftLabel, leftColor, rightLabel, rightColor }
   }
 
   if (checkingAuth) return (
@@ -445,19 +501,23 @@ export default function AdminPage() {
                 : noActivityToday.length === 0 ? <p style={emptyText}>全員作業済み</p>
                 : (
                   <div style={{ display: 'grid', gap: '8px' }}>
-                    {noActivityToday.map(u => (
-                      <div key={u.repme_code} style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '12px', background: 'rgba(3,3,3,0.45)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-                        <div>
-                          <div style={{ fontSize: '14px', fontWeight: 600, color: '#EAEAEA' }}>{u.display_name}</div>
-                          <div style={{ fontSize: '12px', color: '#B8B8B8', marginTop: '2px' }}>
-                            最終作業：{u.lastLogAt ? formatDate(u.lastLogAt) : '記録なし'}
+                    {noActivityToday.map(u => {
+                      const { leftLabel, leftColor, rightLabel, rightColor } = renderAbsentStatus(u)
+                      return (
+                        <div key={u.repme_code} style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '12px', background: 'rgba(3,3,3,0.45)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                          <div>
+                            <div style={{ fontSize: '14px', fontWeight: 600, color: '#EAEAEA' }}>{u.display_name}</div>
+                            <div style={{ fontSize: '12px', color: '#B8B8B8', marginTop: '2px' }}>
+                              最終作業：{u.lastLogAt ? formatDate(u.lastLogAt) : '記録なし'}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                            <div style={{ fontSize: '13px', fontWeight: 600, color: leftColor }}>{leftLabel}</div>
+                            <div style={{ fontSize: '12px', color: rightColor }}>{rightLabel}</div>
                           </div>
                         </div>
-                        <div style={{ fontSize: '13px', fontWeight: 600, color: u.absentDays >= 3 ? '#C07A7A' : '#C0A07A' }}>
-                          {u.absentDays === 0 ? '本日未作業' : `${u.absentDays}日連続欠席`}
-                        </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 )}
             </section>
