@@ -350,7 +350,8 @@ export default function Home() {
   }, [logs])
 
   // Start Plan 達成連続日数
-  // 定義: 今日から遡って「その日のtarget_minutes <= その日のwork_logs合計」が連続している日数
+  // 定義: 今日達成済みなら今日から、未達なら昨日から遡って連続達成日数をカウント
+  // （今日はまだ作業中の可能性があるため、未達の場合は昨日起点にする）
   const achievementStreak = useMemo(() => {
     if (startTaskHistory.length === 0 || logs.length === 0) return 0
 
@@ -368,19 +369,22 @@ export default function Home() {
       targetMap[t.task_date] = t.target_minutes
     })
 
-    // 今日から遡って連続達成日数をカウント
     const todayStr = getJSTDateStr(new Date())
-    let count = 0
-    let checkDate = new Date(Date.now() + jstOffset)
+    const todayTarget = targetMap[todayStr]
+    const todayLogged = dailyMinutesMap[todayStr] || 0
+    const todayAchieved = todayTarget != null && todayLogged >= todayTarget
 
+    // 今日達成済みなら今日から、未達なら昨日から遡る
+    let checkDate = new Date(Date.now() + jstOffset)
+    if (!todayAchieved) {
+      checkDate = new Date(checkDate.getTime() - 86400000)
+    }
+
+    let count = 0
     while (true) {
       const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
-      // 未来日はスキップ
-      if (dateStr > todayStr) { checkDate = new Date(checkDate.getTime() - 86400000); continue }
-      // start planがない日でストップ
       if (!targetMap[dateStr]) break
       const logged = dailyMinutesMap[dateStr] || 0
-      // 未達でストップ
       if (logged < targetMap[dateStr]) break
       count++
       checkDate = new Date(checkDate.getTime() - 86400000)

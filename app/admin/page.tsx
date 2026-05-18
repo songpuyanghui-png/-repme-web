@@ -232,9 +232,16 @@ export default function AdminPage() {
         let count = 0
         let checkDate = new Date(Date.now() + jstOffset)
 
+        // 今日達成済みなら今日から、未達なら昨日から遡る
+        const todayTarget = targetsByDate[todayStr]
+        const todayLogged = logsByDate[todayStr] || 0
+        const todayAchieved = todayTarget != null && todayLogged >= todayTarget
+        if (!todayAchieved) {
+          checkDate = new Date(checkDate.getTime() - 86400000)
+        }
+
         while (true) {
           const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
-          if (dateStr > todayStr) { checkDate = new Date(checkDate.getTime() - 86400000); continue }
           if (!targetsByDate[dateStr]) break
           const logged = logsByDate[dateStr] || 0
           if (logged < targetsByDate[dateStr]) break
