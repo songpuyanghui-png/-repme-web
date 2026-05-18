@@ -70,6 +70,34 @@ type AbsenceReport = {
   report_type: 'absent' | 'no_schedule'
 }
 
+// ユーザー一覧用: 目標時間連続達成日数
+type UserAchievementStreak = {
+  repme_code: string
+  streak: number
+}
+
+// ユーザー詳細用: 今日の達成情報
+type TodayAchievement = {
+  targetMinutes: number | null
+  todayMinutes: number
+  rate: number | null
+}
+
+const jstOffset = 9 * 60 * 60 * 1000
+
+function getJSTDateStr(date: Date): string {
+  const jst = new Date(date.getTime() + jstOffset)
+  return `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+}
+
+function parseUTCString(timeStr: string): Date {
+  if (timeStr.endsWith('Z')) return new Date(timeStr)
+  if (timeStr.length > 10 && (timeStr.slice(10).includes('+') || timeStr.slice(10).includes('-'))) {
+    return new Date(timeStr)
+  }
+  return new Date(timeStr.replace(' ', 'T') + 'Z')
+}
+
 export default function AdminPage() {
   const [isAuthed, setIsAuthed] = useState(false)
   const [checkingAuth, setCheckingAuth] = useState(true)
@@ -86,7 +114,12 @@ export default function AdminPage() {
   const [selectedUser, setSelectedUser] = useState<UserRow | null>(null)
   const [userTasks, setUserTasks] = useState<ScheduleTask[]>([])
   const [userLogsDetail, setUserLogsDetail] = useState<WorkLog[]>([])
+  const [todayAchievement, setTodayAchievement] = useState<TodayAchievement | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+
+  // ユーザー一覧用: 各ユーザーの目標時間連続達成日数
+  const [achievementStreaks, setAchievementStreaks] = useState<UserAchievementStreak[]>([])
+  const [streaksLoading, setStreaksLoading] = useState(false)
 
   const [tab, setTab] = useState<'stats' | 'users'>('stats')
 
@@ -121,6 +154,7 @@ export default function AdminPage() {
   const handleLogout = useCallback(async () => {
     try { await fetch('/api/admin-logout', { method: 'POST' }) } catch {}
     setIsAuthed(false); setLogs([]); setUsers([]); setMessage(''); setSelectedUser(null)
+    setAchievementStreaks([])
   }, [])
 
   const fetchAdminData = useCallback(async () => {
@@ -128,8 +162,6 @@ export default function AdminPage() {
     try {
       setLoading(true); setMessage('')
 
-      // 今日のJST日付
-      const jstOffset = 9 * 60 * 60 * 1000
       const nowJST = new Date(Date.now() + jstOffset)
       const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
 
@@ -154,9 +186,80 @@ export default function AdminPage() {
     finally { setLoading(false) }
   }, [isAuthed])
 
+  // 全ユーザーの目標時間連続達成日数を計算
+  const fetchAllAchievementStreaks = useCallback(async () => {
+    if (!isAuthed) return
+    setStreaksLoading(true)
+    try {
+      const todayStr = getJSTDateStr(new Date())
+
+      // 全ユーザーのstart plan taskを取得
+      const { data: startTasks, error: taskError } = await supabase
+        .from('schedule_tasks')
+        .select('repme_code, task_date, target_minutes')
+        .eq('plan_type', 'start')
+        .lte('task_date', todayStr)
+        .order('task_date', { ascending: false })
+      if (taskError) { console.error(taskError); setStreaksLoading(false); return }
+
+      // 全ユーザーのwork_logsを取得
+      const { data: allLogs, error: logError } = await supabase
+        .from('work_logs')
+        .select('repme_code, start_time, minutes')
+      if (logError) { console.error(logError); setStreaksLoading(false); return }
+
+      // repme_code → { task_date → target_minutes }
+      const taskMap: Record<string, Record<string, number>> = {}
+      ;(startTasks || []).forEach(t => {
+        if (!t.repme_code || !t.task_date || t.target_minutes == null) return
+        if (!taskMap[t.repme_code]) taskMap[t.repme_code] = {}
+        taskMap[t.repme_code][t.task_date] = t.target_minutes
+      })
+
+      // repme_code → { dateStr → 合計minutes }
+      const logMap: Record<string, Record<string, number>> = {}
+      ;(allLogs || []).forEach(l => {
+        if (!l.repme_code || !l.start_time) return
+        const dateStr = getJSTDateStr(parseUTCString(l.start_time))
+        if (!logMap[l.repme_code]) logMap[l.repme_code] = {}
+        logMap[l.repme_code][dateStr] = (logMap[l.repme_code][dateStr] || 0) + (l.minutes || 0)
+      })
+
+      // 各ユーザーの連続達成日数を計算
+      const results: UserAchievementStreak[] = Object.keys(taskMap).map(repmeCode => {
+        const targetsByDate = taskMap[repmeCode]
+        const logsByDate = logMap[repmeCode] || {}
+        let count = 0
+        let checkDate = new Date(Date.now() + jstOffset)
+
+        while (true) {
+          const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
+          if (dateStr > todayStr) { checkDate = new Date(checkDate.getTime() - 86400000); continue }
+          if (!targetsByDate[dateStr]) break
+          const logged = logsByDate[dateStr] || 0
+          if (logged < targetsByDate[dateStr]) break
+          count++
+          checkDate = new Date(checkDate.getTime() - 86400000)
+        }
+        return { repme_code: repmeCode, streak: count }
+      })
+
+      setAchievementStreaks(results)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setStreaksLoading(false)
+    }
+  }, [isAuthed])
+
   const fetchUserDetail = useCallback(async (user: UserRow) => {
     setDetailLoading(true)
     setSelectedUser(user)
+    setTodayAchievement(null)
+
+    const todayStr = getJSTDateStr(new Date())
+    const todayStartUTC = new Date(todayStr + 'T00:00:00+09:00').toISOString()
+    const todayEndUTC = new Date(todayStr + 'T23:59:59+09:00').toISOString()
 
     const { data: tasks, error: taskError } = await supabase
       .from('schedule_tasks')
@@ -179,17 +282,57 @@ export default function AdminPage() {
 
     setUserTasks(tasksWithLogs)
     setUserLogsDetail(allLogs || [])
+
+    // 今日のStart Plan target_minutes
+    const todayStartTask = (tasks || []).find(
+      t => t.plan_type === 'start' && t.task_date === todayStr
+    )
+
+    // 今日のwork_logs合計（JST日付で判定）
+    const todayLogMinutes = (allLogs || [])
+      .filter(l => {
+        if (!l.start_time) return false
+        const d = parseUTCString(l.start_time)
+        const jst = new Date(d.getTime() + jstOffset)
+        const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+        return dateStr === todayStr
+      })
+      .reduce((s, l) => s + (l.minutes || 0), 0)
+
+    // todayStartUTC / todayEndUTC は上で定義済み（lint対策で参照）
+    void todayStartUTC; void todayEndUTC
+
+    if (todayStartTask?.target_minutes != null) {
+      const target = todayStartTask.target_minutes
+      const rate = target > 0 ? Math.round((todayLogMinutes / target) * 100) : null
+      setTodayAchievement({ targetMinutes: target, todayMinutes: todayLogMinutes, rate })
+    } else {
+      setTodayAchievement({ targetMinutes: null, todayMinutes: todayLogMinutes, rate: null })
+    }
+
     setDetailLoading(false)
   }, [])
 
   useEffect(() => { checkAuth() }, [checkAuth])
-  useEffect(() => { if (isAuthed) fetchAdminData() }, [isAuthed, fetchAdminData])
+  useEffect(() => {
+    if (isAuthed) {
+      fetchAdminData()
+      fetchAllAchievementStreaks()
+    }
+  }, [isAuthed, fetchAdminData, fetchAllAchievementStreaks])
 
   const displayNameMap = useMemo(() => {
     const map: Record<string, string> = {}
     users.forEach(u => { map[u.repme_code] = u.display_name || u.repme_code })
     return map
   }, [users])
+
+  // 連続達成日数マップ（repme_code → streak）
+  const achievementStreakMap = useMemo(() => {
+    const map: Record<string, number> = {}
+    achievementStreaks.forEach(s => { map[s.repme_code] = s.streak })
+    return map
+  }, [achievementStreaks])
 
   const visibleUsers = useMemo(() => users, [users])
   const visibleLogs = useMemo(() => logs, [logs])
@@ -265,7 +408,6 @@ export default function AdminPage() {
     })).sort((a, b) => b.totalMinutes - a.totalMinutes)
   }, [visibleLogs])
 
-  // 当日の欠席届マップ（repme_code → report_type）
   const todayAbsenceMap = useMemo(() => {
     const map: Record<string, 'absent' | 'no_schedule'> = {}
     absenceReports.forEach(r => { map[r.repme_code] = r.report_type })
@@ -273,7 +415,6 @@ export default function AdminPage() {
   }, [absenceReports])
 
   const noActivityToday = useMemo<NoActivityUser[]>(() => {
-    const jstOffset = 9 * 60 * 60 * 1000
     const nowJST = new Date(Date.now() + jstOffset)
     const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
 
@@ -306,7 +447,6 @@ export default function AdminPage() {
           const jst = new Date(new Date(lastLog).getTime() + jstOffset)
           const lastDateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
           const diffMs = new Date(todayStr).getTime() - new Date(lastDateStr).getTime()
-          // 日数差 - 1（昨日作業→今日休み = 0日連続欠席 = 本日未作業）
           absentDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)) - 1)
         }
         return {
@@ -336,28 +476,20 @@ export default function AdminPage() {
     }
   }
 
-  // 欠席ステータス表示
   const renderAbsentStatus = (u: NoActivityUser) => {
     const leftLabel = u.absentDays === 0 ? '本日未作業' : `${u.absentDays}日連続欠席`
     const leftColor = u.absentDays >= 2 ? '#C07A7A' : '#C0A07A'
-
     let rightLabel = ''
     let rightColor = ''
-
     if (u.reportType === 'absent') {
-      rightLabel = '欠席届提出済み ✅'
-      rightColor = '#A8C5A0'
+      rightLabel = '欠席届提出済み ✅'; rightColor = '#A8C5A0'
     } else if (u.reportType === 'no_schedule') {
-      rightLabel = '予定提出無し届済み 📋'
-      rightColor = '#7A9EC0'
+      rightLabel = '予定提出無し届済み 📋'; rightColor = '#7A9EC0'
     } else if (u.absentDays >= 1) {
-      rightLabel = '無断欠席 ⚠️'
-      rightColor = '#C07A7A'
+      rightLabel = '無断欠席 ⚠️'; rightColor = '#C07A7A'
     } else {
-      rightLabel = '未提出'
-      rightColor = '#6A6A6A'
+      rightLabel = '未提出'; rightColor = '#6A6A6A'
     }
-
     return { leftLabel, leftColor, rightLabel, rightColor }
   }
 
@@ -396,6 +528,33 @@ export default function AdminPage() {
 
         {detailLoading ? <p style={emptyText}>読み込み中...</p> : (
           <>
+            {/* 今日の達成状況 */}
+            <section style={{ ...glassBox, marginBottom: '18px' }}>
+              <div style={sectionLabel}>今日の達成状況｜Today&apos;s Achievement</div>
+              {todayAchievement ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
+                  <MiniStat
+                    label="目標時間｜Target"
+                    value={todayAchievement.targetMinutes != null ? `${todayAchievement.targetMinutes}分` : '未設定'}
+                  />
+                  <MiniStat
+                    label="本日合計｜Today Total"
+                    value={`${todayAchievement.todayMinutes}分`}
+                  />
+                  <MiniStat
+                    label="達成率｜Rate"
+                    value={
+                      todayAchievement.rate != null
+                        ? `${Math.min(todayAchievement.rate, 100)}%${todayAchievement.rate >= 100 ? ' ✅' : ''}`
+                        : '-'
+                    }
+                  />
+                </div>
+              ) : (
+                <p style={emptyText}>データなし</p>
+              )}
+            </section>
+
             <section style={{ ...glassBox, marginBottom: '18px' }}>
               <div style={sectionLabel}>schedule_tasks｜{userTasks.length}件</div>
               {userTasks.length === 0 ? <p style={emptyText}>taskなし</p> : (
@@ -465,7 +624,7 @@ export default function AdminPage() {
             <p style={{ margin: 0, fontSize: '12px', color: '#9A9A9A' }}>全体統計＋個人サポート用表示</p>
           </div>
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <button onClick={fetchAdminData} disabled={loading} style={smallButtonStyle}>{loading ? '更新中...' : '更新｜Refresh'}</button>
+            <button onClick={() => { fetchAdminData(); fetchAllAchievementStreaks() }} disabled={loading} style={smallButtonStyle}>{loading ? '更新中...' : '更新｜Refresh'}</button>
             <button onClick={handleLogout} style={smallButtonStyle}>ログアウト｜Logout</button>
           </div>
         </div>
@@ -588,21 +747,41 @@ export default function AdminPage() {
             <div style={sectionLabel}>ユーザー一覧｜{users.length}人</div>
             {users.length === 0 ? <p style={emptyText}>ユーザーなし</p> : (
               <div>
-                {users.map(user => (
-                  <div key={user.repme_code}
-                    onClick={() => fetchUserDetail(user)}
-                    style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '12px 0', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <div style={{ fontSize: '14px', fontWeight: 600, color: '#EAEAEA' }}>{user.repme_code}</div>
-                        {user.is_private && <div style={{ fontSize: '10px', color: '#6A6A6A', padding: '2px 6px', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '999px' }}>非表示</div>}
+                {users.map(user => {
+                  const streak = achievementStreakMap[user.repme_code]
+                  return (
+                    <div key={user.repme_code}
+                      onClick={() => fetchUserDetail(user)}
+                      style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '12px 0', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div style={{ fontSize: '14px', fontWeight: 600, color: '#EAEAEA' }}>{user.repme_code}</div>
+                          {user.is_private && <div style={{ fontSize: '10px', color: '#6A6A6A', padding: '2px 6px', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '999px' }}>非表示</div>}
+                        </div>
+                        {user.display_name && <div style={{ fontSize: '12px', color: '#B8B8B8', marginTop: '2px' }}>{user.display_name}</div>}
+                        {user.user_id && <div style={{ fontSize: '11px', color: '#6A6A6A', marginTop: '2px' }}>{user.user_id}</div>}
                       </div>
-                      {user.display_name && <div style={{ fontSize: '12px', color: '#B8B8B8', marginTop: '2px' }}>{user.display_name}</div>}
-                      {user.user_id && <div style={{ fontSize: '11px', color: '#6A6A6A', marginTop: '2px' }}>{user.user_id}</div>}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        {/* 目標時間連続達成日数 */}
+                        <div style={{ textAlign: 'right' }}>
+                          {streaksLoading ? (
+                            <div style={{ fontSize: '11px', color: '#6A6A6A' }}>計算中...</div>
+                          ) : streak != null ? (
+                            <>
+                              <div style={{ fontSize: '13px', fontWeight: 600, color: streak >= 3 ? '#7A9EC0' : '#EAEAEA' }}>
+                                {streak}日連続達成
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#6A6A6A' }}>目標時間連続達成</div>
+                            </>
+                          ) : (
+                            <div style={{ fontSize: '11px', color: '#6A6A6A' }}>Start Plan未設定</div>
+                          )}
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#6A6A6A', whiteSpace: 'nowrap' }}>詳細 →</div>
+                      </div>
                     </div>
-                    <div style={{ fontSize: '12px', color: '#6A6A6A', whiteSpace: 'nowrap' }}>詳細 →</div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </section>

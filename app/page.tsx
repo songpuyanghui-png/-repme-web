@@ -45,6 +45,11 @@ type ScheduleTask = {
   logs?: WorkLog[]
 }
 
+type StartTaskRecord = {
+  task_date: string
+  target_minutes: number
+}
+
 const toUTC = (localStr: string): string => {
   const normalized = localStr.replace(/\//g, '-').replace(' ', 'T')
   return new Date(normalized + ':00+09:00').toISOString()
@@ -55,10 +60,6 @@ const calcMinutes = (startLocal: string, endLocal: string): number => {
   return Math.max(0, Math.floor(diff / 60000))
 }
 
-// UTC文字列を安全にDateオブジェクトに変換
-// - Zで終わる → UTC確定
-// - 10文字目以降に+か-があるオフセット付き → そのままparse
-// - それ以外（オフセットなし）→ UTCとして扱う
 function parseUTCString(timeStr: string): Date {
   if (timeStr.endsWith('Z')) return new Date(timeStr)
   if (timeStr.length > 10 && (timeStr.slice(10).includes('+') || timeStr.slice(10).includes('-'))) {
@@ -85,6 +86,7 @@ export default function Home() {
   const [logs, setLogs] = useState<WorkLog[]>([])
   const [todayTasks, setTodayTasks] = useState<ScheduleTask[]>([])
   const [allTasks, setAllTasks] = useState<ScheduleTask[]>([])
+  const [startTaskHistory, setStartTaskHistory] = useState<StartTaskRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [tasksLoading, setTasksLoading] = useState(false)
   const [message, setMessage] = useState('')
@@ -179,9 +181,27 @@ export default function Home() {
     setAllTasks(data || [])
   }, [isLoggedIn, repmeCode])
 
+  // Start Plan履歴取得（達成連続日数の計算に使用）
+  const fetchStartTaskHistory = useCallback(async () => {
+    if (!isLoggedIn || !repmeCode) { setStartTaskHistory([]); return }
+    const { data, error } = await supabase
+      .from('schedule_tasks')
+      .select('task_date, target_minutes')
+      .eq('repme_code', repmeCode)
+      .eq('plan_type', 'start')
+      .order('task_date', { ascending: false })
+    if (error) { console.error(error); setStartTaskHistory([]); return }
+    setStartTaskHistory(
+      (data || []).filter(
+        (t): t is StartTaskRecord => !!t.task_date && t.target_minutes != null
+      )
+    )
+  }, [isLoggedIn, repmeCode])
+
   useEffect(() => { fetchLogs() }, [fetchLogs])
   useEffect(() => { fetchTodayTasks() }, [fetchTodayTasks])
   useEffect(() => { fetchAllTasks() }, [fetchAllTasks])
+  useEffect(() => { fetchStartTaskHistory() }, [fetchStartTaskHistory])
 
   const handleLogin = async () => {
     if (!repmeCode || !password) { setMessage('コードとパスワードを入力｜Enter code and password'); return }
@@ -195,7 +215,7 @@ export default function Home() {
 
   const handleLogout = () => {
     setIsLoggedIn(false); setRepmeCode(''); setPassword(''); setUserId('')
-    setLogs([]); setTodayTasks([]); setAllTasks([]); setMessage('')
+    setLogs([]); setTodayTasks([]); setAllTasks([]); setStartTaskHistory([]); setMessage('')
     setLoading(false); setTasksLoading(false)
     setManualMinutes(''); setManualMemo(''); setSavingManualLog(false); setSelectedTaskId(null)
     setEditingId(null); setEditingStartTime(''); setEditingEndTime(''); setEditingMemo('')
@@ -301,7 +321,6 @@ export default function Home() {
     const todayStr = getJSTDateStr(new Date())
     const hasToday = dateSet.has(todayStr)
 
-    // 今日作業してれば今日から、してなければ昨日から遡る
     let checkDate = new Date(Date.now() + jstOffset)
     if (!hasToday) {
       checkDate = new Date(checkDate.getTime() - 24 * 60 * 60 * 1000)
@@ -312,10 +331,49 @@ export default function Home() {
       const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
       if (!dateSet.has(dateStr)) break
       count++
-      checkDate = new Date(checkDate.getTime() - 24 * 60 * 60 * 1000)
+      checkDate = new Date(checkDate.getTime() - 86400000)
     }
     return count
   }, [logs])
+
+  // Start Plan 達成連続日数
+  // 定義: 今日から遡って「その日のtarget_minutes <= その日のwork_logs合計」が連続している日数
+  const achievementStreak = useMemo(() => {
+    if (startTaskHistory.length === 0 || logs.length === 0) return 0
+
+    // 日別合計minutesマップ（JST日付 → 合計分）
+    const dailyMinutesMap: Record<string, number> = {}
+    logs.forEach(log => {
+      if (!log.start_time) return
+      const dateStr = getJSTDateStr(parseUTCString(log.start_time))
+      dailyMinutesMap[dateStr] = (dailyMinutesMap[dateStr] || 0) + (log.minutes || 0)
+    })
+
+    // task_date → target_minutesマップ
+    const targetMap: Record<string, number> = {}
+    startTaskHistory.forEach(t => {
+      targetMap[t.task_date] = t.target_minutes
+    })
+
+    // 今日から遡って連続達成日数をカウント
+    const todayStr = getJSTDateStr(new Date())
+    let count = 0
+    let checkDate = new Date(Date.now() + jstOffset)
+
+    while (true) {
+      const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
+      // 未来日はスキップ
+      if (dateStr > todayStr) { checkDate = new Date(checkDate.getTime() - 86400000); continue }
+      // start planがない日でストップ
+      if (!targetMap[dateStr]) break
+      const logged = dailyMinutesMap[dateStr] || 0
+      // 未達でストップ
+      if (logged < targetMap[dateStr]) break
+      count++
+      checkDate = new Date(checkDate.getTime() - 86400000)
+    }
+    return count
+  }, [startTaskHistory, logs])
 
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {}
@@ -459,11 +517,13 @@ export default function Home() {
                 )}
             </section>
 
+            {/* Stats - 達成連続日数を追加 */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '18px' }}>
               <Stat label="合計時間｜Total" value={`${totalMinutes}分`} />
               <Stat label="今日｜Today" value={`${todayMinutes}分`} />
               <Stat label="今週｜This Week" value={`${weekMinutes}分`} />
               <Stat label="連続日数｜Streak" value={`${streak}日`} />
+              <Stat label="達成連続日数｜Achievement Streak" value={`${achievementStreak}日`} />
             </div>
 
             <section style={glassBox}>
