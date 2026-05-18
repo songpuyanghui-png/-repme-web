@@ -562,8 +562,8 @@ export default function Home() {
               <Stat label="今週｜This Week" value={`${weekMinutes}分`} />
               <Stat label="連続日数｜Streak" value={`${streak}日`} />
               <Stat
-                label="目標達成連続日数｜Achievement Streak"
-                value={startPlanTotal > 0 ? `${achievementStreak}日 / ${achievementTotal}日達成 (${startPlanTotal}日中)` : '-'}
+                label="目標達成連続日数 / 累計目標達成日数"
+                value={startPlanTotal > 0 ? `${achievementStreak}日 / ${achievementTotal}日` : '-'}
               />
             </div>
 
