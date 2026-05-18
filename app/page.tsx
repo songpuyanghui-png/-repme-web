@@ -57,16 +57,13 @@ const calcMinutes = (startLocal: string, endLocal: string): number => {
 
 // UTC文字列を安全にDateオブジェクトに変換
 // - Zで終わる → UTC確定
-// - +/-オフセット付き（+00:00等）→ そのままparse
-// - Tあり・オフセットなし（2026-05-18T11:00:00）→ ブラウザがローカルタイム解釈するのでZを付与してUTC扱いに
-// - スペース区切り（2026-05-18 11:00:00）→ TとZを付与してUTC扱いに
+// - 10文字目以降に+か-があるオフセット付き → そのままparse
+// - それ以外（オフセットなし）→ UTCとして扱う
 function parseUTCString(timeStr: string): Date {
   if (timeStr.endsWith('Z')) return new Date(timeStr)
-  // +HH:MM 形式のオフセットが含まれる（10文字目以降に+か-がある）
   if (timeStr.length > 10 && (timeStr.slice(10).includes('+') || timeStr.slice(10).includes('-'))) {
     return new Date(timeStr)
   }
-  // それ以外（オフセットなし）→ UTCとして扱う
   return new Date(timeStr.replace(' ', 'T') + 'Z')
 }
 
@@ -75,6 +72,13 @@ const toLocalInputValue = (utcStr: string): string => {
   const jstOffset = 9 * 60 * 60 * 1000
   const local = new Date(d.getTime() + jstOffset)
   return local.toISOString().slice(0, 16)
+}
+
+const jstOffset = 9 * 60 * 60 * 1000
+
+function getJSTDateStr(date: Date): string {
+  const jst = new Date(date.getTime() + jstOffset)
+  return `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
 }
 
 export default function Home() {
@@ -119,7 +123,6 @@ export default function Home() {
     if (!isLoggedIn || !repmeCode) { setTodayTasks([]); setTasksLoading(false); return }
     setTasksLoading(true)
     try {
-      const jstOffset = 9 * 60 * 60 * 1000
       const nowJST = new Date(Date.now() + jstOffset)
       const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
       const todayStartUTC = new Date(todayStr + 'T00:00:00+09:00').toISOString()
@@ -164,7 +167,6 @@ export default function Home() {
 
   const fetchAllTasks = useCallback(async () => {
     if (!isLoggedIn || !repmeCode) { setAllTasks([]); return }
-    const jstOffset = 9 * 60 * 60 * 1000
     const todayJST = new Date(Date.now() + jstOffset).toISOString().slice(0, 10)
     const { data, error } = await supabase
       .from('schedule_tasks')
@@ -265,17 +267,13 @@ export default function Home() {
     finally { setDeletingId(null) }
   }
 
-  const jstOffset = 9 * 60 * 60 * 1000
-
   const totalMinutes = useMemo(() => logs.reduce((sum, log) => sum + (log.minutes || 0), 0), [logs])
 
   const todayMinutes = useMemo(() => {
-    const nowJST = new Date(Date.now() + jstOffset)
-    const todayStr = `${nowJST.getUTCFullYear()}-${String(nowJST.getUTCMonth() + 1).padStart(2, '0')}-${String(nowJST.getUTCDate()).padStart(2, '0')}`
+    const todayStr = getJSTDateStr(new Date())
     return logs.reduce((sum, log) => {
       if (!log.start_time) return sum
-      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
-      const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+      const dateStr = getJSTDateStr(parseUTCString(log.start_time))
       return dateStr === todayStr ? sum + (log.minutes || 0) : sum
     }, 0)
   }, [logs])
@@ -288,8 +286,7 @@ export default function Home() {
     const weekStartStr = `${weekStartJST.getUTCFullYear()}-${String(weekStartJST.getUTCMonth() + 1).padStart(2, '0')}-${String(weekStartJST.getUTCDate()).padStart(2, '0')}`
     return logs.reduce((sum, log) => {
       if (!log.start_time) return sum
-      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
-      const dateStr = `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+      const dateStr = getJSTDateStr(parseUTCString(log.start_time))
       return dateStr >= weekStartStr ? sum + (log.minutes || 0) : sum
     }, 0)
   }, [logs])
@@ -298,11 +295,18 @@ export default function Home() {
     if (logs.length === 0) return 0
     const dateSet = new Set(logs.map((log) => {
       if (!log.start_time) return ''
-      const jst = new Date(parseUTCString(log.start_time).getTime() + jstOffset)
-      return `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`
+      return getJSTDateStr(parseUTCString(log.start_time))
     }).filter(Boolean))
-    const nowJST = new Date(Date.now() + jstOffset)
-    let checkDate = new Date(Date.UTC(nowJST.getUTCFullYear(), nowJST.getUTCMonth(), nowJST.getUTCDate()))
+
+    const todayStr = getJSTDateStr(new Date())
+    const hasToday = dateSet.has(todayStr)
+
+    // 今日作業してれば今日から、してなければ昨日から遡る
+    let checkDate = new Date(Date.now() + jstOffset)
+    if (!hasToday) {
+      checkDate = new Date(checkDate.getTime() - 24 * 60 * 60 * 1000)
+    }
+
     let count = 0
     while (true) {
       const dateStr = `${checkDate.getUTCFullYear()}-${String(checkDate.getUTCMonth() + 1).padStart(2, '0')}-${String(checkDate.getUTCDate()).padStart(2, '0')}`
